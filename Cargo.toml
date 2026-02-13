@@ -1,0 +1,50 @@
+[package]
+name = "alloy-monad-evm"
+description = "Monad EVM implementation"
+version = "0.1.1"
+edition = "2021"
+rust-version = "1.88"
+authors = ["Haythem Sellami - Category Labs <hsellami@category.xyz>"]
+license = "MIT"
+homepage = "https://github.com/category-labs/alloy-monad-evm"
+repository = "https://github.com/category-labs/alloy-monad-evm"
+documentation = "https://docs.rs/alloy-monad-evm"
+keywords = ["monad", "evm", "alloy", "ethereum", "blockchain"]
+categories = ["cryptography::cryptocurrencies"]
+readme = "README.md"
+
+[lints.rustdoc]
+all = "warn"
+
+[lints.rust]
+missing-debug-implementations = "warn"
+missing-docs = "warn"
+unreachable-pub = "warn"
+unused-must-use = "deny"
+rust-2018-idioms = "deny"
+unnameable-types = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+missing-const-for-fn = "warn"
+use-self = "warn"
+option-if-let-else = "allow"
+redundant-clone = "warn"
+
+[dependencies]
+alloy-evm = { version = "0.26.3", default-features = false }
+alloy-primitives = { version = "1.0.0", default-features = false }
+revm = { version = "34.0.0", default-features = false }
+monad-revm = { version = "0.1.0", default-features = false }
+
+[dev-dependencies]
+test-case = "3"
+
+[features]
+default = ["std"]
+std = [
+    "alloy-primitives/std",
+    "revm/std",
+    "alloy-evm/std",
+]
+asm-keccak = ["alloy-evm/asm-keccak", "alloy-primitives/asm-keccak", "revm/asm-keccak"]
