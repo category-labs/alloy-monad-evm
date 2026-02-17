@@ -65,7 +65,10 @@ impl<DB: Database, I, P> MonadEvm<DB, I, P> {
         evm: InnerMonadEvm<MonadContext<DB>, I, MonadInstructions<MonadContext<DB>>, P>,
         inspect: bool,
     ) -> Self {
-        Self { inner: evm, inspect }
+        Self {
+            inner: evm,
+            inspect,
+        }
     }
 }
 
@@ -129,7 +132,12 @@ where
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec>) {
-        let Context { block: block_env, cfg: monad_cfg, journaled_state, .. } = self.inner.0.ctx;
+        let Context {
+            block: block_env,
+            cfg: monad_cfg,
+            journaled_state,
+            ..
+        } = self.inner.0.ctx;
         // Convert MonadCfgEnv back to CfgEnv<MonadSpecId> for EvmEnv
         let cfg_env = monad_cfg.into_inner();
 
@@ -251,7 +259,9 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
                 PrecompileId::Custom("MonadStaking".into()),
                 |input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
                     // Create a storage reader that uses input.internals.sload()
-                    let mut reader = PrecompileInputStorageReader { internals: input.internals };
+                    let mut reader = PrecompileInputStorageReader {
+                        internals: input.internals,
+                    };
 
                     // Run the staking precompile
                     match staking::run_staking_with_reader(input.data, input.gas, &mut reader) {
