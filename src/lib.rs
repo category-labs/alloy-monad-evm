@@ -258,6 +258,21 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
             Some(DynPrecompile::new_stateful(
                 PrecompileId::Custom("MonadStaking".into()),
                 |input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
+                    // Reject DELEGATECALL/CALLCODE (target_address != bytecode_address)
+                    if !input.is_direct_call() {
+                        return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                    }
+
+                    // Reject STATICCALL and calls inside a static frame
+                    if input.is_static {
+                        return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                    }
+
+                    // Reject non-zero value (not payable)
+                    if input.value != U256::ZERO {
+                        return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                    }
+
                     // Create a storage reader that uses input.internals.sload()
                     let mut reader = PrecompileInputStorageReader {
                         internals: input.internals,
