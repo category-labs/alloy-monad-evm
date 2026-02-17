@@ -65,7 +65,10 @@ impl<DB: Database, I, P> MonadEvm<DB, I, P> {
         evm: InnerMonadEvm<MonadContext<DB>, I, MonadInstructions<MonadContext<DB>>, P>,
         inspect: bool,
     ) -> Self {
-        Self { inner: evm, inspect }
+        Self {
+            inner: evm,
+            inspect,
+        }
     }
 }
 
@@ -129,7 +132,12 @@ where
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec>) {
-        let Context { block: block_env, cfg: monad_cfg, journaled_state, .. } = self.inner.0.ctx;
+        let Context {
+            block: block_env,
+            cfg: monad_cfg,
+            journaled_state,
+            ..
+        } = self.inner.0.ctx;
         // Convert MonadCfgEnv back to CfgEnv<MonadSpecId> for EvmEnv
         let cfg_env = monad_cfg.into_inner();
 
@@ -250,8 +258,25 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
             Some(DynPrecompile::new_stateful(
                 PrecompileId::Custom("MonadStaking".into()),
                 |input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
+                    // Reject DELEGATECALL/CALLCODE (target_address != bytecode_address)
+                    if !input.is_direct_call() {
+                        return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                    }
+
+                    // Reject STATICCALL and calls inside a static frame
+                    if input.is_static {
+                        return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                    }
+
+                    // Reject non-zero value (not payable)
+                    if input.value != U256::ZERO {
+                        return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                    }
+
                     // Create a storage reader that uses input.internals.sload()
-                    let mut reader = PrecompileInputStorageReader { internals: input.internals };
+                    let mut reader = PrecompileInputStorageReader {
+                        internals: input.internals,
+                    };
 
                     // Run the staking precompile
                     match staking::run_staking_with_reader(input.data, input.gas, &mut reader) {
