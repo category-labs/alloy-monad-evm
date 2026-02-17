@@ -1,5 +1,9 @@
 # Alloy Monad EVM
 
+[![Crates.io](https://img.shields.io/crates/v/alloy-monad-evm.svg)](https://crates.io/crates/alloy-monad-evm)
+[![Documentation](https://docs.rs/alloy-monad-evm/badge.svg)](https://docs.rs/alloy-monad-evm)
+[![License](https://img.shields.io/crates/l/alloy-monad-evm.svg)](LICENSE)
+
 `alloy-monad-evm` provides Monad chain support by wrapping [monad-revm](https://crates.io/crates/monad-revm) with `alloy-evm` traits (`Evm`, `EvmFactory`).
 
 ## Features
@@ -28,4 +32,4 @@ let evm = factory.create_evm(db, env);
 
 ## License
 
-Licensed under [MIT license](LICENSE-MIT).
+Licensed under [MIT license](LICENSE).
