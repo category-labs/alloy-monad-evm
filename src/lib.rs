@@ -16,7 +16,7 @@ use alloy_primitives::{Address, Bytes, U256};
 use monad_revm::{
     instructions::MonadInstructions,
     precompiles::MonadPrecompiles,
-    staking::{self, StorageReader, STAKING_ADDRESS, write::StakingStorage},
+    staking::{self, write::StakingStorage, StorageReader, STAKING_ADDRESS},
     DefaultMonad, MonadBuilder, MonadCfgEnv, MonadEvm as InnerMonadEvm, MonadSpecId,
 };
 use revm::{
@@ -269,16 +269,13 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
                     }
 
                     // Decode selector for per-selector payability check
-                    let selector: [u8; 4] = input
-                        .data
-                        .get(..4)
-                        .and_then(|s| s.try_into().ok())
-                        .ok_or(PrecompileError::Other("Invalid input: missing selector".into()))?;
+                    let selector: [u8; 4] =
+                        input.data.get(..4).and_then(|s| s.try_into().ok()).ok_or(
+                            PrecompileError::Other("Invalid input: missing selector".into()),
+                        )?;
 
                     // Per-selector payability check
-                    if input.value != U256::ZERO
-                        && !staking::write::is_payable_selector(selector)
-                    {
+                    if input.value != U256::ZERO && !staking::write::is_payable_selector(selector) {
                         return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
                     }
 
@@ -304,11 +301,7 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
                         let mut reader = PrecompileInputStakingStorage {
                             internals: input.internals,
                         };
-                        match staking::run_staking_with_reader(
-                            input.data,
-                            input.gas,
-                            &mut reader,
-                        ) {
+                        match staking::run_staking_with_reader(input.data, input.gas, &mut reader) {
                             Ok(result) => interpreter_result_to_output(input.gas, result),
                             Err(e) => Err(PrecompileError::Other(e.into())),
                         }
@@ -370,12 +363,12 @@ impl StakingStorage for PrecompileInputStakingStorage<'_> {
         }
         match self.internals.transfer(from, to, amount) {
             Ok(None) => Ok(()),
-            Ok(Some(e)) => {
-                Err(PrecompileError::Other(format!("Transfer failed: {e:?}").into()))
-            }
-            Err(e) => {
-                Err(PrecompileError::Other(format!("Transfer error: {e:?}").into()))
-            }
+            Ok(Some(e)) => Err(PrecompileError::Other(
+                format!("Transfer failed: {e:?}").into(),
+            )),
+            Err(e) => Err(PrecompileError::Other(
+                format!("Transfer error: {e:?}").into(),
+            )),
         }
     }
 
