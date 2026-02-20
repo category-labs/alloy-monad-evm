@@ -241,7 +241,12 @@ impl EvmFactory for MonadEvmFactory {
 /// Extend a `PrecompilesMap` with Monad-specific precompiles.
 ///
 /// This function adds the staking precompile (at address 0x1000) to the given
-/// `PrecompilesMap` via `set_precompile_lookup`.
+/// `PrecompilesMap` via `apply_precompile`, which explicitly registers the address
+/// in the precompile address set. This ensures:
+/// - 0x1000 appears in `addresses()` / `precompile_addresses()`
+/// - Foundry's warm address set includes 0x1000
+/// - Foundry's `RevertDiagnostic` inspector skips 0x1000 (no misleading
+///   "call to non-contract address" on precompile reverts)
 ///
 /// # Example
 ///
@@ -253,64 +258,60 @@ impl EvmFactory for MonadEvmFactory {
 /// extend_monad_precompiles(&mut precompiles);
 /// ```
 pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
-    precompiles.set_precompile_lookup(move |address: &Address| {
-        if *address == STAKING_ADDRESS {
-            Some(DynPrecompile::new_stateful(
-                PrecompileId::Custom("MonadStaking".into()),
-                |input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
-                    // Reject DELEGATECALL/CALLCODE (target_address != bytecode_address)
-                    if !input.is_direct_call() {
-                        return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
-                    }
+    precompiles.apply_precompile(&STAKING_ADDRESS, |_| {
+        Some(DynPrecompile::new_stateful(
+            PrecompileId::Custom("MonadStaking".into()),
+            |input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
+                // Reject DELEGATECALL/CALLCODE (target_address != bytecode_address)
+                if !input.is_direct_call() {
+                    return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                }
 
-                    // Reject STATICCALL and calls inside a static frame
-                    if input.is_static {
-                        return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
-                    }
+                // Reject STATICCALL and calls inside a static frame
+                if input.is_static {
+                    return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                }
 
-                    // Decode selector for per-selector payability check
-                    let selector: [u8; 4] =
-                        input.data.get(..4).and_then(|s| s.try_into().ok()).ok_or(
-                            PrecompileError::Other("Invalid input: missing selector".into()),
-                        )?;
+                // Decode selector for per-selector payability check
+                let selector: [u8; 4] =
+                    input.data.get(..4).and_then(|s| s.try_into().ok()).ok_or(
+                        PrecompileError::Other("Invalid input: missing selector".into()),
+                    )?;
 
-                    // Per-selector payability check
-                    if input.value != U256::ZERO && !staking::write::is_payable_selector(selector) {
-                        return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
-                    }
+                // Per-selector payability check
+                if input.value != U256::ZERO && !staking::write::is_payable_selector(selector) {
+                    return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                }
 
-                    // Route write selectors through the write module
-                    if staking::write::is_write_selector(selector) {
-                        let mut storage = PrecompileInputStakingStorage {
-                            internals: input.internals,
-                        };
-                        let caller = input.caller;
-                        let call_value = input.value;
-                        match staking::write::run_staking_write(
-                            input.data,
-                            input.gas,
-                            &mut storage,
-                            &caller,
-                            call_value,
-                        ) {
-                            Ok(result) => interpreter_result_to_output(input.gas, result),
-                            Err(e) => Err(PrecompileError::Other(e.into())),
-                        }
-                    } else {
-                        // Read operations
-                        let mut reader = PrecompileInputStakingStorage {
-                            internals: input.internals,
-                        };
-                        match staking::run_staking_with_reader(input.data, input.gas, &mut reader) {
-                            Ok(result) => interpreter_result_to_output(input.gas, result),
-                            Err(e) => Err(PrecompileError::Other(e.into())),
-                        }
+                // Route write selectors through the write module
+                if staking::write::is_write_selector(selector) {
+                    let mut storage = PrecompileInputStakingStorage {
+                        internals: input.internals,
+                    };
+                    let caller = input.caller;
+                    let call_value = input.value;
+                    match staking::write::run_staking_write(
+                        input.data,
+                        input.gas,
+                        &mut storage,
+                        &caller,
+                        call_value,
+                    ) {
+                        Ok(result) => interpreter_result_to_output(input.gas, result),
+                        Err(e) => Err(PrecompileError::Other(e.into())),
                     }
-                },
-            ))
-        } else {
-            None
-        }
+                } else {
+                    // Read operations
+                    let mut reader = PrecompileInputStakingStorage {
+                        internals: input.internals,
+                    };
+                    match staking::run_staking_with_reader(input.data, input.gas, &mut reader) {
+                        Ok(result) => interpreter_result_to_output(input.gas, result),
+                        Err(e) => Err(PrecompileError::Other(e.into())),
+                    }
+                }
+            },
+        ))
     });
 }
 
