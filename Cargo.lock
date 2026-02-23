@@ -2228,7 +2228,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "monad-revm"
 version = "0.1.0"
-source = "git+https://github.com/category-labs/monad-revm.git?branch=feat%2Fstaking-write-functions#8be17d40374fcc0fc7412f6d66020d7fffa3da52"
+source = "git+https://github.com/category-labs/monad-revm.git?branch=feat%2Fstaking-write-functions#a42cb3f1942f484cdb6f9a1b9a51fac34d8fc765"
 dependencies = [
  "alloy-sol-types",
  "auto_impl",

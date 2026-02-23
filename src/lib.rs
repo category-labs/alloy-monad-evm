@@ -272,10 +272,24 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
                     return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
                 }
 
-                // Decode selector for per-selector payability check
-                let selector: [u8; 4] = input.data.get(..4).and_then(|s| s.try_into().ok()).ok_or(
-                    PrecompileError::Other("Invalid input: missing selector".into()),
-                )?;
+                // Decode selector — short input routes to fallback via write path
+                let selector: [u8; 4] = match input.data.get(..4).and_then(|s| s.try_into().ok()) {
+                    Some(s) => s,
+                    None => {
+                        // Route short input through write path for proper fallback handling
+                        let mut storage = PrecompileInputStakingStorage {
+                            internals: input.internals,
+                        };
+                        let result = staking::write::run_staking_write(
+                            input.data,
+                            input.gas,
+                            &mut storage,
+                            &input.caller,
+                            input.value,
+                        ).map_err(|e| PrecompileError::Other(e.into()))?;
+                        return interpreter_result_to_output(input.gas, result);
+                    }
+                };
 
                 // Per-selector payability check
                 if input.value != U256::ZERO && !staking::write::is_payable_selector(selector) {
