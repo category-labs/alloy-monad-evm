@@ -291,12 +291,7 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
                     }
                 };
 
-                // Per-selector payability check
-                if input.value != U256::ZERO && !staking::write::is_payable_selector(selector) {
-                    return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
-                }
-
-                // Route write selectors through the write module
+                // Route write selectors through the write module (payability checked per-method inside)
                 if staking::write::is_write_selector(selector) {
                     let mut storage = PrecompileInputStakingStorage {
                         internals: input.internals,
@@ -314,11 +309,11 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
                         Err(e) => Err(PrecompileError::Other(e.into())),
                     }
                 } else {
-                    // Read operations
+                    // Read operations (payability checked per-method inside)
                     let mut reader = PrecompileInputStakingStorage {
                         internals: input.internals,
                     };
-                    match staking::run_staking_with_reader(input.data, input.gas, &mut reader) {
+                    match staking::run_staking_with_reader(input.data, input.gas, &mut reader, input.value) {
                         Ok(result) => interpreter_result_to_output(input.gas, result),
                         Err(e) => Err(PrecompileError::Other(e.into())),
                     }
