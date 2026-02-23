@@ -40,6 +40,9 @@ monad-revm = { version = "0.1.0", default-features = false }
 [dev-dependencies]
 test-case = "3"
 
+[patch.crates-io]
+monad-revm = { git = "https://github.com/category-labs/monad-revm.git", branch = "feat/staking-write-functions" }
+
 [features]
 default = ["std"]
 std = [
