@@ -16,7 +16,7 @@ use alloy_primitives::{Address, Bytes, U256};
 use monad_revm::{
     instructions::MonadInstructions,
     precompiles::MonadPrecompiles,
-    staking::{self, StorageReader, STAKING_ADDRESS},
+    staking::{self, write::StakingStorage, StorageReader, STAKING_ADDRESS},
     DefaultMonad, MonadBuilder, MonadCfgEnv, MonadEvm as InnerMonadEvm, MonadSpecId,
 };
 use revm::{
@@ -241,7 +241,12 @@ impl EvmFactory for MonadEvmFactory {
 /// Extend a `PrecompilesMap` with Monad-specific precompiles.
 ///
 /// This function adds the staking precompile (at address 0x1000) to the given
-/// `PrecompilesMap` via `set_precompile_lookup`.
+/// `PrecompilesMap` via `apply_precompile`, which explicitly registers the address
+/// in the precompile address set. This ensures:
+/// - 0x1000 appears in `addresses()` / `precompile_addresses()`
+/// - Foundry's warm address set includes 0x1000
+/// - Foundry's `RevertDiagnostic` inspector skips 0x1000 (no misleading
+///   "call to non-contract address" on precompile reverts)
 ///
 /// # Example
 ///
@@ -253,64 +258,137 @@ impl EvmFactory for MonadEvmFactory {
 /// extend_monad_precompiles(&mut precompiles);
 /// ```
 pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
-    precompiles.set_precompile_lookup(move |address: &Address| {
-        if *address == STAKING_ADDRESS {
-            Some(DynPrecompile::new_stateful(
-                PrecompileId::Custom("MonadStaking".into()),
-                |input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
-                    // Reject DELEGATECALL/CALLCODE (target_address != bytecode_address)
-                    if !input.is_direct_call() {
-                        return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
-                    }
+    precompiles.apply_precompile(&STAKING_ADDRESS, |_| {
+        Some(DynPrecompile::new_stateful(
+            PrecompileId::Custom("MonadStaking".into()),
+            |input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
+                // Reject DELEGATECALL/CALLCODE (target_address != bytecode_address)
+                if !input.is_direct_call() {
+                    return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                }
 
-                    // Reject STATICCALL and calls inside a static frame
-                    if input.is_static {
-                        return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
-                    }
+                // Reject STATICCALL and calls inside a static frame
+                if input.is_static {
+                    return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                }
 
-                    // Reject non-zero value (not payable)
-                    if input.value != U256::ZERO {
-                        return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                // Decode selector — short input routes to fallback via write path
+                let selector: [u8; 4] = match input.data.get(..4).and_then(|s| s.try_into().ok()) {
+                    Some(s) => s,
+                    None => {
+                        // Route short input through write path for proper fallback handling
+                        let mut storage = PrecompileInputStakingStorage {
+                            internals: input.internals,
+                        };
+                        let result = staking::write::run_staking_write(
+                            input.data,
+                            input.gas,
+                            &mut storage,
+                            &input.caller,
+                            input.value,
+                        )
+                        .map_err(|e| PrecompileError::Other(e.into()))?;
+                        return interpreter_result_to_output(input.gas, result);
                     }
+                };
 
-                    // Create a storage reader that uses input.internals.sload()
-                    let mut reader = PrecompileInputStorageReader {
+                // Route write selectors through the write module (payability checked per-method inside)
+                if staking::write::is_write_selector(selector) {
+                    let mut storage = PrecompileInputStakingStorage {
                         internals: input.internals,
                     };
-
-                    // Run the staking precompile
-                    match staking::run_staking_with_reader(input.data, input.gas, &mut reader) {
-                        Ok(result) => {
-                            // Convert InterpreterResult to PrecompileOutput
-                            let gas_used = input.gas.saturating_sub(result.gas.remaining());
-                            if result.result == InstructionResult::Return {
-                                Ok(PrecompileOutput::new(gas_used, result.output))
-                            } else if result.result == InstructionResult::PrecompileOOG {
-                                Err(PrecompileError::OutOfGas)
-                            } else {
-                                Err(PrecompileError::Other("Staking precompile error".into()))
-                            }
-                        }
+                    let caller = input.caller;
+                    let call_value = input.value;
+                    match staking::write::run_staking_write(
+                        input.data,
+                        input.gas,
+                        &mut storage,
+                        &caller,
+                        call_value,
+                    ) {
+                        Ok(result) => interpreter_result_to_output(input.gas, result),
                         Err(e) => Err(PrecompileError::Other(e.into())),
                     }
-                },
-            ))
-        } else {
-            None
-        }
+                } else {
+                    // Read operations (payability checked per-method inside)
+                    let mut reader = PrecompileInputStakingStorage {
+                        internals: input.internals,
+                    };
+                    match staking::run_staking_with_reader(
+                        input.data,
+                        input.gas,
+                        &mut reader,
+                        input.value,
+                    ) {
+                        Ok(result) => interpreter_result_to_output(input.gas, result),
+                        Err(e) => Err(PrecompileError::Other(e.into())),
+                    }
+                }
+            },
+        ))
     });
 }
 
-/// Storage reader implementation that uses `PrecompileInput.internals.sload()`.
-struct PrecompileInputStorageReader<'a> {
+/// Convert an `InterpreterResult` to a `PrecompileOutput`.
+fn interpreter_result_to_output(
+    gas_limit: u64,
+    result: InterpreterResult,
+) -> Result<PrecompileOutput, PrecompileError> {
+    let gas_used = gas_limit.saturating_sub(result.gas.remaining());
+    if result.result == InstructionResult::Return {
+        Ok(PrecompileOutput::new(gas_used, result.output))
+    } else if result.result == InstructionResult::PrecompileOOG {
+        Err(PrecompileError::OutOfGas)
+    } else {
+        // Revert
+        Ok(PrecompileOutput::new_reverted(gas_used, result.output))
+    }
+}
+
+/// Storage implementation that uses `PrecompileInput.internals` for both reads and writes.
+struct PrecompileInputStakingStorage<'a> {
     internals: alloy_evm::EvmInternals<'a>,
 }
 
-impl StorageReader for PrecompileInputStorageReader<'_> {
+impl StorageReader for PrecompileInputStakingStorage<'_> {
     fn sload(&mut self, key: U256) -> Result<U256, PrecompileError> {
         self.internals
             .sload(STAKING_ADDRESS, key)
             .map(|r| r.data)
             .map_err(|e| PrecompileError::Other(format!("Storage read failed: {e:?}").into()))
+    }
+}
+
+impl StakingStorage for PrecompileInputStakingStorage<'_> {
+    fn sstore(&mut self, key: U256, value: U256) -> Result<(), PrecompileError> {
+        self.internals
+            .sstore(STAKING_ADDRESS, key, value)
+            .map(|_| ())
+            .map_err(|e| PrecompileError::Other(format!("Storage write failed: {e:?}").into()))
+    }
+
+    fn transfer(
+        &mut self,
+        from: Address,
+        to: Address,
+        amount: U256,
+    ) -> Result<(), PrecompileError> {
+        if amount.is_zero() {
+            return Ok(());
+        }
+        match self.internals.transfer(from, to, amount) {
+            Ok(None) => Ok(()),
+            Ok(Some(e)) => Err(PrecompileError::Other(
+                format!("Transfer failed: {e:?}").into(),
+            )),
+            Err(e) => Err(PrecompileError::Other(
+                format!("Transfer error: {e:?}").into(),
+            )),
+        }
+    }
+
+    fn emit_log(&mut self, log: revm::primitives::Log) -> Result<(), PrecompileError> {
+        self.internals.log(log);
+        Ok(())
     }
 }
