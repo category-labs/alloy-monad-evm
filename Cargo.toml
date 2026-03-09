@@ -40,8 +40,8 @@ monad-revm = { version = "0.2.0", default-features = false }
 [dev-dependencies]
 test-case = "3"
 
-# [patch.crates-io]
-# monad-revm = { git = "https://github.com/category-labs/monad-revm.git", branch = "feat/staking-write-functions" }
+[patch.crates-io]
+monad-revm = { git = "https://github.com/category-labs/monad-revm.git", branch = "feat/mip-3-linear-memory" }
 
 [features]
 default = ["std"]
@@ -50,4 +50,5 @@ std = [
     "revm/std",
     "alloy-evm/std",
 ]
+memory_limit = ["monad-revm/memory_limit"]
 asm-keccak = ["alloy-evm/asm-keccak", "alloy-primitives/asm-keccak", "revm/asm-keccak"]
