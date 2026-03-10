@@ -44,7 +44,7 @@ test-case = "3"
 monad-revm = { git = "https://github.com/category-labs/monad-revm.git", branch = "feat/mip-3-linear-memory" }
 
 [features]
-default = ["std"]
+default = ["std", "memory_limit"]
 std = [
     "alloy-primitives/std",
     "revm/std",
