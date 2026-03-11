@@ -9,22 +9,25 @@
 //! - [`extend_monad_precompiles`]: Function to extend `PrecompilesMap` with staking precompile
 
 use alloy_evm::{
-    precompiles::{DynPrecompile, PrecompileInput, PrecompilesMap},
-    Database, Evm, EvmEnv, EvmFactory,
+    precompiles::{DynPrecompile, Precompile, PrecompileInput, PrecompilesMap},
+    Database, Evm, EvmEnv, EvmFactory, EvmInternals,
 };
 use alloy_primitives::{Address, Bytes, U256};
 use monad_revm::{
     instructions::MonadInstructions,
+    monad_context_with_db,
     precompiles::MonadPrecompiles,
+    reserve_balance::{self, abi::RESERVE_BALANCE_ADDRESS},
     staking::{self, write::StakingStorage, StorageReader, STAKING_ADDRESS},
-    DefaultMonad, MonadBuilder, MonadCfgEnv, MonadEvm as InnerMonadEvm, MonadSpecId,
+    MonadBuilder, MonadCfgEnv, MonadEvm as InnerMonadEvm, MonadSpecId,
 };
 use revm::{
     context::{BlockEnv, TxEnv},
     context_interface::result::{EVMError, HaltReason, ResultAndState},
+    context_interface::{ContextTr, JournalTr, LocalContextTr},
     handler::PrecompileProvider,
     inspector::NoOpInspector,
-    interpreter::{InstructionResult, InterpreterResult},
+    interpreter::{CallInput, CallInputs, Gas, InstructionResult, InterpreterResult},
     precompile::{PrecompileError, PrecompileId, PrecompileOutput},
     Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
 };
@@ -33,13 +36,167 @@ use std::ops::{Deref, DerefMut};
 // Re-export monad-revm types for external users
 pub use monad_revm::{handler::MonadHandler, MonadContext};
 
+/// Monad-aware precompile wrapper that works with `MonadJournal`.
+#[derive(Clone, Debug)]
+pub struct MonadPrecompilesMap {
+    inner: PrecompilesMap,
+    spec: MonadSpecId,
+}
+
+impl MonadPrecompilesMap {
+    /// Create a new Monad precompile map for the given spec.
+    pub fn new_with_spec(spec: MonadSpecId) -> Self {
+        let monad_precompiles = MonadPrecompiles::new_with_spec(spec);
+        let mut inner = PrecompilesMap::from_static(monad_precompiles.precompiles());
+        extend_monad_precompiles(&mut inner);
+        Self { inner, spec }
+    }
+
+    /// Returns the precompile addresses, including Monad-only precompiles.
+    pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
+        let reserve_balance_enabled = MonadSpecId::MonadNine.is_enabled_in(self.spec);
+        std::iter::once(STAKING_ADDRESS)
+            .chain(reserve_balance_enabled.then_some(RESERVE_BALANCE_ADDRESS))
+            .chain(self.inner.addresses().copied().filter(move |address| {
+                *address != STAKING_ADDRESS
+                    && (!reserve_balance_enabled || *address != RESERVE_BALANCE_ADDRESS)
+            }))
+    }
+
+    /// Returns whether the address is a Monad precompile.
+    pub fn contains(&self, address: &Address) -> bool {
+        *address == STAKING_ADDRESS
+            || (MonadSpecId::MonadNine.is_enabled_in(self.spec)
+                && *address == RESERVE_BALANCE_ADDRESS)
+            || self.inner.get(address).is_some()
+    }
+
+    fn run_dynamic<DB: Database>(
+        &mut self,
+        context: &mut MonadContext<DB>,
+        inputs: &CallInputs,
+    ) -> Result<Option<InterpreterResult>, String> {
+        let Some(precompile) = self.inner.get(&inputs.bytecode_address) else {
+            return Ok(None);
+        };
+
+        let mut result = InterpreterResult {
+            result: InstructionResult::Return,
+            gas: Gas::new(inputs.gas_limit),
+            output: Bytes::new(),
+        };
+
+        let (block, tx, cfg, journaled_state, _, local) = context.all_mut();
+
+        let input_bytes = match &inputs.input {
+            CallInput::SharedBuffer(range) => {
+                if let Some(slice) = local.shared_memory_buffer_slice(range.clone()) {
+                    slice.to_vec()
+                } else {
+                    Vec::new()
+                }
+            }
+            CallInput::Bytes(bytes) => bytes.to_vec(),
+        };
+
+        let precompile_result = precompile.call(PrecompileInput {
+            data: &input_bytes,
+            gas: inputs.gas_limit,
+            caller: inputs.caller,
+            value: inputs.call_value(),
+            is_static: inputs.is_static,
+            internals: EvmInternals::new(journaled_state, block, cfg, tx),
+            target_address: inputs.target_address,
+            bytecode_address: inputs.bytecode_address,
+        });
+
+        match precompile_result {
+            Ok(output) => {
+                let underflow = result.gas.record_cost(output.gas_used);
+                assert!(underflow, "Gas underflow is not possible");
+                result.result = if output.reverted {
+                    InstructionResult::Revert
+                } else {
+                    InstructionResult::Return
+                };
+                result.output = output.bytes;
+            }
+            Err(PrecompileError::Fatal(error)) => return Err(error),
+            Err(error) => {
+                result.result = if error.is_oog() {
+                    InstructionResult::PrecompileOOG
+                } else {
+                    InstructionResult::PrecompileError
+                };
+                if !error.is_oog() && context.journal().depth() == 1 {
+                    context
+                        .local_mut()
+                        .set_precompile_error_context(error.to_string());
+                }
+            }
+        }
+
+        Ok(Some(result))
+    }
+}
+
+impl Deref for MonadPrecompilesMap {
+    type Target = PrecompilesMap;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl DerefMut for MonadPrecompilesMap {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<DB: Database> PrecompileProvider<MonadContext<DB>> for MonadPrecompilesMap {
+    type Output = InterpreterResult;
+
+    fn set_spec(&mut self, spec: MonadSpecId) -> bool {
+        if spec == self.spec {
+            return false;
+        }
+        *self = Self::new_with_spec(spec);
+        true
+    }
+
+    fn run(
+        &mut self,
+        context: &mut MonadContext<DB>,
+        inputs: &CallInputs,
+    ) -> Result<Option<Self::Output>, String> {
+        if let Some(result) = staking::run_staking_precompile(context, inputs)? {
+            return Ok(Some(result));
+        }
+
+        if let Some(result) = reserve_balance::run_reserve_balance_precompile(context, inputs)? {
+            return Ok(Some(result));
+        }
+
+        self.run_dynamic(context, inputs)
+    }
+
+    fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
+        Box::new(self.addresses())
+    }
+
+    fn contains(&self, address: &Address) -> bool {
+        Self::contains(self, address)
+    }
+}
+
 /// Monad EVM implementation.
 ///
 /// This is a wrapper type around the `monad_revm::MonadEvm` with optional [`Inspector`] (tracing)
 /// support. [`Inspector`] support is configurable at runtime because it's part of the underlying
 /// [`InnerMonadEvm`](monad_revm::MonadEvm) type.
 #[allow(missing_debug_implementations)] // MonadEvm doesn't impl Debug
-pub struct MonadEvm<DB: Database, I, P = PrecompilesMap> {
+pub struct MonadEvm<DB: Database, I, P = MonadPrecompilesMap> {
     inner: InnerMonadEvm<MonadContext<DB>, I, MonadInstructions<MonadContext<DB>>, P>,
     inspect: bool,
 }
@@ -141,7 +298,10 @@ where
         // Convert MonadCfgEnv back to CfgEnv<MonadSpecId> for EvmEnv
         let cfg_env = monad_cfg.into_inner();
 
-        (journaled_state.database, EvmEnv { block_env, cfg_env })
+        (
+            journaled_state.into_database(),
+            EvmEnv { block_env, cfg_env },
+        )
     }
 
     fn set_inspector_enabled(&mut self, enabled: bool) {
@@ -180,7 +340,7 @@ impl EvmFactory for MonadEvmFactory {
     type HaltReason = HaltReason;
     type Spec = MonadSpecId;
     type BlockEnv = BlockEnv;
-    type Precompiles = PrecompilesMap;
+    type Precompiles = MonadPrecompilesMap;
 
     fn create_evm<DB: Database>(
         &self,
@@ -191,18 +351,12 @@ impl EvmFactory for MonadEvmFactory {
         // Convert CfgEnv<MonadSpecId> to MonadCfgEnv for Monad-specific defaults (128KB code size)
         let monad_cfg = MonadCfgEnv::from(input.cfg_env);
 
-        // Create PrecompilesMap from Monad static precompiles and extend with staking precompile
-        let monad_precompiles = MonadPrecompiles::new_with_spec(spec_id);
-        let mut precompiles = PrecompilesMap::from_static(monad_precompiles.precompiles());
-        extend_monad_precompiles(&mut precompiles);
-
         MonadEvm {
-            inner: Context::monad()
-                .with_db(db)
+            inner: monad_context_with_db(db)
                 .with_block(input.block_env)
                 .with_cfg(monad_cfg)
                 .build_monad_with_inspector(NoOpInspector {})
-                .with_precompiles(precompiles),
+                .with_precompiles(MonadPrecompilesMap::new_with_spec(spec_id)),
             inspect: false,
         }
     }
@@ -217,18 +371,12 @@ impl EvmFactory for MonadEvmFactory {
         // Convert CfgEnv<MonadSpecId> to MonadCfgEnv for Monad-specific defaults (128KB code size)
         let monad_cfg = MonadCfgEnv::from(input.cfg_env);
 
-        // Create PrecompilesMap from Monad static precompiles and extend with staking precompile
-        let monad_precompiles = MonadPrecompiles::new_with_spec(spec_id);
-        let mut precompiles = PrecompilesMap::from_static(monad_precompiles.precompiles());
-        extend_monad_precompiles(&mut precompiles);
-
         MonadEvm {
-            inner: Context::monad()
-                .with_db(db)
+            inner: monad_context_with_db(db)
                 .with_block(input.block_env)
                 .with_cfg(monad_cfg)
                 .build_monad_with_inspector(inspector)
-                .with_precompiles(precompiles),
+                .with_precompiles(MonadPrecompilesMap::new_with_spec(spec_id)),
             inspect: true,
         }
     }
@@ -390,5 +538,67 @@ impl StakingStorage for PrecompileInputStakingStorage<'_> {
     fn emit_log(&mut self, log: revm::primitives::Log) -> Result<(), PrecompileError> {
         self.internals.log(log);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staking_precompile_is_available_on_all_monad_specs() {
+        for spec in [
+            MonadSpecId::MonadEight,
+            MonadSpecId::MonadNine,
+            MonadSpecId::MonadNext,
+        ] {
+            let precompiles = MonadPrecompilesMap::new_with_spec(spec);
+            let addresses = precompiles.addresses().collect::<Vec<_>>();
+
+            assert!(precompiles.contains(&STAKING_ADDRESS));
+            assert!(addresses.contains(&STAKING_ADDRESS));
+        }
+    }
+
+    #[test]
+    fn reserve_balance_precompile_is_gated_to_monad_nine_and_later() {
+        let monad_eight = MonadPrecompilesMap::new_with_spec(MonadSpecId::MonadEight);
+        let monad_nine = MonadPrecompilesMap::new_with_spec(MonadSpecId::MonadNine);
+        let monad_next = MonadPrecompilesMap::new_with_spec(MonadSpecId::MonadNext);
+
+        assert!(!monad_eight.contains(&RESERVE_BALANCE_ADDRESS));
+        assert!(!monad_eight
+            .addresses()
+            .any(|address| address == RESERVE_BALANCE_ADDRESS));
+
+        assert!(monad_nine.contains(&RESERVE_BALANCE_ADDRESS));
+        assert!(monad_nine
+            .addresses()
+            .any(|address| address == RESERVE_BALANCE_ADDRESS));
+
+        assert!(monad_next.contains(&RESERVE_BALANCE_ADDRESS));
+        assert!(monad_next
+            .addresses()
+            .any(|address| address == RESERVE_BALANCE_ADDRESS));
+    }
+
+    #[test]
+    fn set_spec_rebuilds_monad_only_precompile_set() {
+        let mut precompiles = MonadPrecompilesMap::new_with_spec(MonadSpecId::MonadEight);
+
+        assert!(!precompiles.contains(&RESERVE_BALANCE_ADDRESS));
+        assert!(
+            PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
+                &mut precompiles,
+                MonadSpecId::MonadNine
+            )
+        );
+        assert!(precompiles.contains(&RESERVE_BALANCE_ADDRESS));
+        assert!(
+            !PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
+                &mut precompiles,
+                MonadSpecId::MonadNine
+            )
+        );
     }
 }
