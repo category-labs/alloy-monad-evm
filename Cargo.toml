@@ -41,7 +41,7 @@ monad-revm = { version = "0.2.0", default-features = false }
 test-case = "3"
 
 [patch.crates-io]
-monad-revm = { git = "https://github.com/category-labs/monad-revm.git", branch = "feat/mip-4-reserve-balance-precompile" }
+monad-revm = { git = "https://github.com/category-labs/monad-revm.git", branch = "main" }
 
 [features]
 default = ["std", "memory_limit"]
