@@ -2228,7 +2228,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "monad-revm"
 version = "0.2.0"
-source = "git+https://github.com/category-labs/monad-revm.git?branch=demo-pagified-state#cf919020f35c2b0cf416b6570affe5de7c988cc5"
+source = "git+https://github.com/category-labs/monad-revm.git?branch=demo-pagified-state#bd15e4bdce5be54acbda16110c9b6ef9eb606140"
 dependencies = [
  "alloy-sol-types",
  "auto_impl",
