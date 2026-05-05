@@ -22,13 +22,13 @@ use monad_revm::{
     MonadBuilder, MonadCfgEnv, MonadEvm as InnerMonadEvm, MonadSpecId,
 };
 use revm::{
-    context::{BlockEnv, TxEnv},
+    context::{BlockEnv, CfgEnv, TxEnv},
     context_interface::result::{EVMError, HaltReason, ResultAndState},
     context_interface::{ContextTr, JournalTr, LocalContextTr},
-    handler::PrecompileProvider,
+    handler::{precompile_output_to_interpreter_result, PrecompileProvider},
     inspector::NoOpInspector,
-    interpreter::{CallInput, CallInputs, Gas, InstructionResult, InterpreterResult},
-    precompile::{PrecompileError, PrecompileId, PrecompileOutput},
+    interpreter::{CallInputs, InstructionResult, InterpreterResult},
+    precompile::{PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput},
     Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
 };
 use std::ops::{Deref, DerefMut};
@@ -80,28 +80,12 @@ impl MonadPrecompilesMap {
             return Ok(None);
         };
 
-        let mut result = InterpreterResult {
-            result: InstructionResult::Return,
-            gas: Gas::new(inputs.gas_limit),
-            output: Bytes::new(),
-        };
-
         let (block, tx, cfg, journaled_state, _, local) = context.all_mut();
 
-        let input_bytes = match &inputs.input {
-            CallInput::SharedBuffer(range) => {
-                if let Some(slice) = local.shared_memory_buffer_slice(range.clone()) {
-                    slice.to_vec()
-                } else {
-                    Vec::new()
-                }
-            }
-            CallInput::Bytes(bytes) => bytes.to_vec(),
-        };
-
         let precompile_result = precompile.call(PrecompileInput {
-            data: &input_bytes,
+            data: inputs.input.as_bytes_local(local).as_ref(),
             gas: inputs.gas_limit,
+            reservoir: inputs.reservoir,
             caller: inputs.caller,
             value: inputs.call_value(),
             is_static: inputs.is_static,
@@ -110,33 +94,19 @@ impl MonadPrecompilesMap {
             bytecode_address: inputs.bytecode_address,
         });
 
-        match precompile_result {
-            Ok(output) => {
-                let underflow = result.gas.record_cost(output.gas_used);
-                assert!(underflow, "Gas underflow is not possible");
-                result.result = if output.reverted {
-                    InstructionResult::Revert
-                } else {
-                    InstructionResult::Return
-                };
-                result.output = output.bytes;
-            }
-            Err(PrecompileError::Fatal(error)) => return Err(error),
-            Err(error) => {
-                result.result = if error.is_oog() {
-                    InstructionResult::PrecompileOOG
-                } else {
-                    InstructionResult::PrecompileError
-                };
-                if !error.is_oog() && context.journal().depth() == 1 {
-                    context
-                        .local_mut()
-                        .set_precompile_error_context(error.to_string());
-                }
+        let output = precompile_result.map_err(|e| e.to_string())?;
+        if let Some(halt_reason) = output.halt_reason() {
+            if !halt_reason.is_oog() && context.journal().depth() == 1 {
+                context
+                    .local_mut()
+                    .set_precompile_error_context(halt_reason.to_string());
             }
         }
 
-        Ok(Some(result))
+        Ok(Some(precompile_output_to_interpreter_result(
+            output,
+            inputs.gas_limit,
+        )))
     }
 }
 
@@ -249,7 +219,9 @@ impl<DB, I, P> Evm for MonadEvm<DB, I, P>
 where
     DB: Database,
     I: Inspector<MonadContext<DB>>,
-    P: PrecompileProvider<MonadContext<DB>, Output = InterpreterResult>,
+    P: PrecompileProvider<MonadContext<DB>, Output = InterpreterResult>
+        + Deref<Target = PrecompilesMap>
+        + DerefMut,
 {
     type DB = DB;
     type Tx = TxEnv;
@@ -257,11 +229,15 @@ where
     type HaltReason = HaltReason;
     type Spec = MonadSpecId;
     type BlockEnv = BlockEnv;
-    type Precompiles = P;
+    type Precompiles = PrecompilesMap;
     type Inspector = I;
 
     fn block(&self) -> &BlockEnv {
         &self.block
+    }
+
+    fn cfg_env(&self) -> &CfgEnv<Self::Spec> {
+        self.cfg.inner()
     }
 
     fn chain_id(&self) -> u64 {
@@ -288,7 +264,7 @@ where
         self.inner.system_call_with_caller(caller, contract, data)
     }
 
-    fn finish(self) -> (Self::DB, EvmEnv<Self::Spec>) {
+    fn finish(self) -> (Self::DB, EvmEnv<Self::Spec, Self::BlockEnv>) {
         let Context {
             block: block_env,
             cfg: monad_cfg,
@@ -333,14 +309,14 @@ where
 pub struct MonadEvmFactory;
 
 impl EvmFactory for MonadEvmFactory {
-    type Evm<DB: Database, I: Inspector<MonadContext<DB>>> = MonadEvm<DB, I, Self::Precompiles>;
+    type Evm<DB: Database, I: Inspector<MonadContext<DB>>> = MonadEvm<DB, I>;
     type Context<DB: Database> = MonadContext<DB>;
     type Tx = TxEnv;
     type Error<DBError: core::error::Error + Send + Sync + 'static> = EVMError<DBError>;
     type HaltReason = HaltReason;
     type Spec = MonadSpecId;
     type BlockEnv = BlockEnv;
-    type Precompiles = MonadPrecompilesMap;
+    type Precompiles = PrecompilesMap;
 
     fn create_evm<DB: Database>(
         &self,
@@ -412,12 +388,12 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
             |input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
                 // Reject DELEGATECALL/CALLCODE (target_address != bytecode_address)
                 if !input.is_direct_call() {
-                    return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                    return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir));
                 }
 
                 // Reject STATICCALL and calls inside a static frame
                 if input.is_static {
-                    return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                    return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir));
                 }
 
                 // Decode selector — short input routes to fallback via write path
@@ -435,8 +411,8 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
                             &input.caller,
                             input.value,
                         )
-                        .map_err(|e| PrecompileError::Other(e.into()))?;
-                        return interpreter_result_to_output(input.gas, result);
+                        .map_err(PrecompileError::Fatal)?;
+                        return interpreter_result_to_output(input.reservoir, result);
                     }
                 };
 
@@ -454,8 +430,8 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
                         &caller,
                         call_value,
                     ) {
-                        Ok(result) => interpreter_result_to_output(input.gas, result),
-                        Err(e) => Err(PrecompileError::Other(e.into())),
+                        Ok(result) => interpreter_result_to_output(input.reservoir, result),
+                        Err(e) => Err(PrecompileError::Fatal(e)),
                     }
                 } else {
                     // Read operations (payability checked per-method inside)
@@ -468,8 +444,8 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
                         &mut reader,
                         input.value,
                     ) {
-                        Ok(result) => interpreter_result_to_output(input.gas, result),
-                        Err(e) => Err(PrecompileError::Other(e.into())),
+                        Ok(result) => interpreter_result_to_output(input.reservoir, result),
+                        Err(e) => Err(PrecompileError::Fatal(e)),
                     }
                 }
             },
@@ -479,17 +455,17 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
 
 /// Convert an `InterpreterResult` to a `PrecompileOutput`.
 fn interpreter_result_to_output(
-    gas_limit: u64,
+    reservoir: u64,
     result: InterpreterResult,
 ) -> Result<PrecompileOutput, PrecompileError> {
-    let gas_used = gas_limit.saturating_sub(result.gas.remaining());
+    let gas_used = result.gas.total_gas_spent();
     if result.result == InstructionResult::Return {
-        Ok(PrecompileOutput::new(gas_used, result.output))
+        Ok(PrecompileOutput::new(gas_used, result.output, reservoir))
     } else if result.result == InstructionResult::PrecompileOOG {
-        Err(PrecompileError::OutOfGas)
+        Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, reservoir))
     } else {
         // Revert
-        Ok(PrecompileOutput::new_reverted(gas_used, result.output))
+        Ok(PrecompileOutput::revert(gas_used, result.output, reservoir))
     }
 }
 
@@ -499,43 +475,34 @@ struct PrecompileInputStakingStorage<'a> {
 }
 
 impl StorageReader for PrecompileInputStakingStorage<'_> {
-    fn sload(&mut self, key: U256) -> Result<U256, PrecompileError> {
+    fn sload(&mut self, key: U256) -> Result<U256, PrecompileHalt> {
         self.internals
             .sload(STAKING_ADDRESS, key)
             .map(|r| r.data)
-            .map_err(|e| PrecompileError::Other(format!("Storage read failed: {e:?}").into()))
+            .map_err(|e| PrecompileHalt::other(format!("Storage read failed: {e:?}")))
     }
 }
 
 impl StakingStorage for PrecompileInputStakingStorage<'_> {
-    fn sstore(&mut self, key: U256, value: U256) -> Result<(), PrecompileError> {
+    fn sstore(&mut self, key: U256, value: U256) -> Result<(), PrecompileHalt> {
         self.internals
             .sstore(STAKING_ADDRESS, key, value)
             .map(|_| ())
-            .map_err(|e| PrecompileError::Other(format!("Storage write failed: {e:?}").into()))
+            .map_err(|e| PrecompileHalt::other(format!("Storage write failed: {e:?}")))
     }
 
-    fn transfer(
-        &mut self,
-        from: Address,
-        to: Address,
-        amount: U256,
-    ) -> Result<(), PrecompileError> {
+    fn transfer(&mut self, from: Address, to: Address, amount: U256) -> Result<(), PrecompileHalt> {
         if amount.is_zero() {
             return Ok(());
         }
         match self.internals.transfer(from, to, amount) {
             Ok(None) => Ok(()),
-            Ok(Some(e)) => Err(PrecompileError::Other(
-                format!("Transfer failed: {e:?}").into(),
-            )),
-            Err(e) => Err(PrecompileError::Other(
-                format!("Transfer error: {e:?}").into(),
-            )),
+            Ok(Some(e)) => Err(PrecompileHalt::other(format!("Transfer failed: {e:?}"))),
+            Err(e) => Err(PrecompileHalt::other(format!("Transfer error: {e:?}"))),
         }
     }
 
-    fn emit_log(&mut self, log: revm::primitives::Log) -> Result<(), PrecompileError> {
+    fn emit_log(&mut self, log: revm::primitives::Log) -> Result<(), PrecompileHalt> {
         self.internals.log(log);
         Ok(())
     }
@@ -544,6 +511,13 @@ impl StakingStorage for PrecompileInputStakingStorage<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_precompiles_map_factory<F: EvmFactory<Precompiles = PrecompilesMap>>() {}
+
+    #[test]
+    fn monad_factory_exposes_precompiles_map() {
+        assert_precompiles_map_factory::<MonadEvmFactory>();
+    }
 
     #[test]
     fn staking_precompile_is_available_on_all_monad_specs() {
