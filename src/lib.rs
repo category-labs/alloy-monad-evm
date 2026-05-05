@@ -6,7 +6,7 @@
 //! - [`MonadEvm`]: Wrapper implementing [`alloy_evm::Evm`] trait
 //! - [`MonadEvmFactory`]: Factory implementing [`alloy_evm::EvmFactory`] trait
 //! - [`MonadContext`]: Type alias for Monad EVM context (re-exported from monad-revm)
-//! - [`extend_monad_precompiles`]: Function to extend `PrecompilesMap` with staking precompile
+//! - [`extend_monad_precompiles`]: Function to extend `PrecompilesMap` with Monad precompiles
 
 use alloy_evm::{
     precompiles::{DynPrecompile, Precompile, PrecompileInput, PrecompilesMap},
@@ -48,7 +48,7 @@ impl MonadPrecompilesMap {
     pub fn new_with_spec(spec: MonadSpecId) -> Self {
         let monad_precompiles = MonadPrecompiles::new_with_spec(spec);
         let mut inner = PrecompilesMap::from_static(monad_precompiles.precompiles());
-        extend_monad_precompiles(&mut inner);
+        extend_monad_precompiles_for_spec(&mut inner, spec);
         Self { inner, spec }
     }
 
@@ -362,15 +362,11 @@ impl EvmFactory for MonadEvmFactory {
 // PrecompilesMap Integration
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Extend a `PrecompilesMap` with Monad-specific precompiles.
+/// Extend a `PrecompilesMap` with spec-independent Monad precompiles.
 ///
-/// This function adds the staking precompile (at address 0x1000) to the given
-/// `PrecompilesMap` via `apply_precompile`, which explicitly registers the address
-/// in the precompile address set. This ensures:
-/// - 0x1000 appears in `addresses()` / `precompile_addresses()`
-/// - Foundry's warm address set includes 0x1000
-/// - Foundry's `RevertDiagnostic` inspector skips 0x1000 (no misleading
-///   "call to non-contract address" on precompile reverts)
+/// This function adds the staking precompile to the given `PrecompilesMap`.
+/// Use [`extend_monad_precompiles_for_spec`] when hardfork-gated precompiles
+/// such as reserve-balance should be included.
 ///
 /// # Example
 ///
@@ -382,6 +378,25 @@ impl EvmFactory for MonadEvmFactory {
 /// extend_monad_precompiles(&mut precompiles);
 /// ```
 pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
+    extend_monad_staking_precompile(precompiles);
+}
+
+/// Extend a `PrecompilesMap` with Monad precompiles for a specific Monad spec.
+///
+/// This explicitly registers Monad-only addresses in the exposed
+/// `PrecompilesMap` so Foundry diagnostics and warm-address logic see the same
+/// precompile set that `MonadPrecompilesMap` dispatches internally.
+pub fn extend_monad_precompiles_for_spec(precompiles: &mut PrecompilesMap, spec: MonadSpecId) {
+    extend_monad_staking_precompile(precompiles);
+
+    if MonadSpecId::MonadNine.is_enabled_in(spec) {
+        extend_monad_reserve_balance_precompile(precompiles);
+    } else {
+        precompiles.apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| None);
+    }
+}
+
+fn extend_monad_staking_precompile(precompiles: &mut PrecompilesMap) {
     precompiles.apply_precompile(&STAKING_ADDRESS, |_| {
         Some(DynPrecompile::new_stateful(
             PrecompileId::Custom("MonadStaking".into()),
@@ -453,6 +468,21 @@ pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
     });
 }
 
+fn extend_monad_reserve_balance_precompile(precompiles: &mut PrecompilesMap) {
+    precompiles.apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| {
+        Some(DynPrecompile::new_stateful(
+            PrecompileId::Custom("MonadReserveBalance".into()),
+            |_input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
+                // Runtime dispatch for this address is handled before `run_dynamic`;
+                // this entry keeps the exposed `PrecompilesMap` metadata complete.
+                Err(PrecompileError::Fatal(
+                    "reserve-balance execution requires MonadPrecompilesMap".into(),
+                ))
+            },
+        ))
+    });
+}
+
 /// Convert an `InterpreterResult` to a `PrecompileOutput`.
 fn interpreter_result_to_output(
     reservoir: u64,
@@ -517,6 +547,47 @@ mod tests {
     #[test]
     fn monad_factory_exposes_precompiles_map() {
         assert_precompiles_map_factory::<MonadEvmFactory>();
+    }
+
+    fn factory_exposes_precompile(spec: MonadSpecId, address: Address) -> bool {
+        let evm = MonadEvmFactory.create_evm(
+            revm::database::EmptyDB::default(),
+            EvmEnv::new(CfgEnv::new_with_spec(spec), BlockEnv::default()),
+        );
+
+        let contains = evm
+            .precompiles()
+            .addresses()
+            .any(|precompile_address| *precompile_address == address);
+
+        contains
+    }
+
+    #[test]
+    fn monad_factory_exposes_staking_precompile_address() {
+        for spec in [
+            MonadSpecId::MonadEight,
+            MonadSpecId::MonadNine,
+            MonadSpecId::MonadNext,
+        ] {
+            assert!(factory_exposes_precompile(spec, STAKING_ADDRESS));
+        }
+    }
+
+    #[test]
+    fn monad_factory_exposes_reserve_balance_precompile_address_when_enabled() {
+        assert!(!factory_exposes_precompile(
+            MonadSpecId::MonadEight,
+            RESERVE_BALANCE_ADDRESS
+        ));
+        assert!(factory_exposes_precompile(
+            MonadSpecId::MonadNine,
+            RESERVE_BALANCE_ADDRESS
+        ));
+        assert!(factory_exposes_precompile(
+            MonadSpecId::MonadNext,
+            RESERVE_BALANCE_ADDRESS
+        ));
     }
 
     #[test]
