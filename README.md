@@ -16,13 +16,13 @@ For the staking precompile design and detailed semantics, see the `monad-revm` R
 
 1. `MonadEvm`: `alloy_evm::Evm` implementation wrapping `monad_revm::MonadEvm`.
 2. `MonadEvmFactory`: `alloy_evm::EvmFactory` implementation for building Monad EVM instances from Alloy environments.
-3. `extend_monad_precompiles`: helper that registers Monad staking precompile (`0x1000`) into a `PrecompilesMap`.
+3. `extend_monad_precompiles_for_spec`: helper that registers Monad precompile metadata into a `PrecompilesMap` for a specific Monad spec.
 
 ## Staking integration at Alloy level
 
 `alloy-monad-evm` does not reimplement staking logic. It delegates execution to `monad-revm` staking modules and focuses on wiring:
 
-- Registers `0x1000` via `PrecompilesMap::apply_precompile` so the address is discoverable in precompile address sets.
+- Registers Monad-only precompile addresses via `PrecompilesMap::apply_precompile` so they are discoverable in precompile address sets.
 - Ensures precompile-aware tooling behavior (for example, Foundry warm precompile handling and better revert diagnostics).
 - Routes write selectors through `monad_revm::staking::write::run_staking_write`.
 - Routes read selectors through `monad_revm::staking::run_staking_with_reader`.
@@ -35,6 +35,7 @@ This keeps staking behavior centralized in one place (`monad-revm`) while allowi
 - Monad gas model (cold access repricing, no refunds).
 - Monad precompile repricing.
 - Staking precompile at `0x1000` (read + write + syscalls, via `monad-revm`).
+- Reserve-balance precompile metadata at `0x1001` for MonadNine and later.
 
 ## Usage
 
@@ -52,10 +53,11 @@ let evm = factory.create_evm(db, env);
 
 ```rust
 use alloy_evm::precompiles::PrecompilesMap;
-use alloy_monad_evm::extend_monad_precompiles;
+use alloy_monad_evm::extend_monad_precompiles_for_spec;
+use monad_revm::MonadSpecId;
 
 let mut precompiles = PrecompilesMap::default();
-extend_monad_precompiles(&mut precompiles);
+extend_monad_precompiles_for_spec(&mut precompiles, MonadSpecId::MonadNine);
 ```
 
 ## Crate surface
@@ -64,7 +66,7 @@ extend_monad_precompiles(&mut precompiles);
 - `MonadEvmFactory`
 - `MonadContext` (re-export from `monad-revm`)
 - `MonadHandler` (re-export from `monad-revm`)
-- `extend_monad_precompiles`
+- `extend_monad_precompiles_for_spec`
 
 ## Feature flags
 

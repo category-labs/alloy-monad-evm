@@ -6,7 +6,7 @@
 //! - [`MonadEvm`]: Wrapper implementing [`alloy_evm::Evm`] trait
 //! - [`MonadEvmFactory`]: Factory implementing [`alloy_evm::EvmFactory`] trait
 //! - [`MonadContext`]: Type alias for Monad EVM context (re-exported from monad-revm)
-//! - [`extend_monad_precompiles`]: Function to extend `PrecompilesMap` with Monad precompiles
+//! - [`extend_monad_precompiles_for_spec`]: Function to extend `PrecompilesMap` with Monad precompiles
 
 use alloy_evm::{
     precompiles::{DynPrecompile, Precompile, PrecompileInput, PrecompilesMap},
@@ -362,30 +362,22 @@ impl EvmFactory for MonadEvmFactory {
 // PrecompilesMap Integration
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Extend a `PrecompilesMap` with spec-independent Monad precompiles.
-///
-/// This function adds the staking precompile to the given `PrecompilesMap`.
-/// Use [`extend_monad_precompiles_for_spec`] when hardfork-gated precompiles
-/// such as reserve-balance should be included.
-///
-/// # Example
-///
-/// ```ignore
-/// use alloy_evm::precompiles::PrecompilesMap;
-/// use alloy_monad_evm::extend_monad_precompiles;
-///
-/// let mut precompiles = PrecompilesMap::default();
-/// extend_monad_precompiles(&mut precompiles);
-/// ```
-pub fn extend_monad_precompiles(precompiles: &mut PrecompilesMap) {
-    extend_monad_staking_precompile(precompiles);
-}
-
 /// Extend a `PrecompilesMap` with Monad precompiles for a specific Monad spec.
 ///
 /// This explicitly registers Monad-only addresses in the exposed
 /// `PrecompilesMap` so Foundry diagnostics and warm-address logic see the same
 /// precompile set that `MonadPrecompilesMap` dispatches internally.
+///
+/// # Example
+///
+/// ```ignore
+/// use alloy_evm::precompiles::PrecompilesMap;
+/// use alloy_monad_evm::extend_monad_precompiles_for_spec;
+/// use monad_revm::MonadSpecId;
+///
+/// let mut precompiles = PrecompilesMap::default();
+/// extend_monad_precompiles_for_spec(&mut precompiles, MonadSpecId::MonadNine);
+/// ```
 pub fn extend_monad_precompiles_for_spec(precompiles: &mut PrecompilesMap, spec: MonadSpecId) {
     extend_monad_staking_precompile(precompiles);
 
