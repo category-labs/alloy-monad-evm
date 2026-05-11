@@ -19,7 +19,7 @@ use monad_revm::{
     precompiles::MonadPrecompiles,
     reserve_balance::{self, abi::RESERVE_BALANCE_ADDRESS},
     staking::{self, write::StakingStorage, StorageReader, STAKING_ADDRESS},
-    MonadBuilder, MonadCfgEnv, MonadEvm as InnerMonadEvm, MonadSpecId,
+    MonadBuilder, MonadCfgEnv, MonadEvm as InnerMonadEvm, MonadHardfork,
 };
 use revm::{
     context::{BlockEnv, CfgEnv, TxEnv},
@@ -40,12 +40,12 @@ pub use monad_revm::{handler::MonadHandler, MonadContext};
 #[derive(Clone, Debug)]
 pub struct MonadPrecompilesMap {
     inner: PrecompilesMap,
-    spec: MonadSpecId,
+    spec: MonadHardfork,
 }
 
 impl MonadPrecompilesMap {
     /// Create a new Monad precompile map for the given spec.
-    pub fn new_with_spec(spec: MonadSpecId) -> Self {
+    pub fn new_with_spec(spec: MonadHardfork) -> Self {
         let monad_precompiles = MonadPrecompiles::new_with_spec(spec);
         let mut inner = PrecompilesMap::from_static(monad_precompiles.precompiles());
         extend_monad_precompiles_for_spec(&mut inner, spec);
@@ -54,7 +54,7 @@ impl MonadPrecompilesMap {
 
     /// Returns the precompile addresses, including Monad-only precompiles.
     pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
-        let reserve_balance_enabled = MonadSpecId::MonadNine.is_enabled_in(self.spec);
+        let reserve_balance_enabled = MonadHardfork::MonadNine.is_enabled_in(self.spec);
         std::iter::once(STAKING_ADDRESS)
             .chain(reserve_balance_enabled.then_some(RESERVE_BALANCE_ADDRESS))
             .chain(self.inner.addresses().copied().filter(move |address| {
@@ -66,7 +66,7 @@ impl MonadPrecompilesMap {
     /// Returns whether the address is a Monad precompile.
     pub fn contains(&self, address: &Address) -> bool {
         *address == STAKING_ADDRESS
-            || (MonadSpecId::MonadNine.is_enabled_in(self.spec)
+            || (MonadHardfork::MonadNine.is_enabled_in(self.spec)
                 && *address == RESERVE_BALANCE_ADDRESS)
             || self.inner.get(address).is_some()
     }
@@ -127,7 +127,7 @@ impl DerefMut for MonadPrecompilesMap {
 impl<DB: Database> PrecompileProvider<MonadContext<DB>> for MonadPrecompilesMap {
     type Output = InterpreterResult;
 
-    fn set_spec(&mut self, spec: MonadSpecId) -> bool {
+    fn set_spec(&mut self, spec: MonadHardfork) -> bool {
         if spec == self.spec {
             return false;
         }
@@ -227,7 +227,7 @@ where
     type Tx = TxEnv;
     type Error = EVMError<DB::Error>;
     type HaltReason = HaltReason;
-    type Spec = MonadSpecId;
+    type Spec = MonadHardfork;
     type BlockEnv = BlockEnv;
     type Precompiles = PrecompilesMap;
     type Inspector = I;
@@ -271,7 +271,7 @@ where
             journaled_state,
             ..
         } = self.inner.0.ctx;
-        // Convert MonadCfgEnv back to CfgEnv<MonadSpecId> for EvmEnv
+        // Convert MonadCfgEnv back to CfgEnv<MonadHardfork> for EvmEnv
         let cfg_env = monad_cfg.into_inner();
 
         (
@@ -314,17 +314,17 @@ impl EvmFactory for MonadEvmFactory {
     type Tx = TxEnv;
     type Error<DBError: core::error::Error + Send + Sync + 'static> = EVMError<DBError>;
     type HaltReason = HaltReason;
-    type Spec = MonadSpecId;
+    type Spec = MonadHardfork;
     type BlockEnv = BlockEnv;
     type Precompiles = PrecompilesMap;
 
     fn create_evm<DB: Database>(
         &self,
         db: DB,
-        input: EvmEnv<MonadSpecId>,
+        input: EvmEnv<MonadHardfork>,
     ) -> Self::Evm<DB, NoOpInspector> {
         let spec_id = input.cfg_env.spec;
-        // Convert CfgEnv<MonadSpecId> to MonadCfgEnv for Monad-specific defaults (128KB code size)
+        // Convert CfgEnv<MonadHardfork> to MonadCfgEnv for Monad-specific defaults (128KB code size)
         let monad_cfg = MonadCfgEnv::from(input.cfg_env);
 
         MonadEvm {
@@ -340,11 +340,11 @@ impl EvmFactory for MonadEvmFactory {
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
         &self,
         db: DB,
-        input: EvmEnv<MonadSpecId>,
+        input: EvmEnv<MonadHardfork>,
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let spec_id = input.cfg_env.spec;
-        // Convert CfgEnv<MonadSpecId> to MonadCfgEnv for Monad-specific defaults (128KB code size)
+        // Convert CfgEnv<MonadHardfork> to MonadCfgEnv for Monad-specific defaults (128KB code size)
         let monad_cfg = MonadCfgEnv::from(input.cfg_env);
 
         MonadEvm {
@@ -373,15 +373,15 @@ impl EvmFactory for MonadEvmFactory {
 /// ```ignore
 /// use alloy_evm::precompiles::PrecompilesMap;
 /// use alloy_monad_evm::extend_monad_precompiles_for_spec;
-/// use monad_revm::MonadSpecId;
+/// use monad_revm::MonadHardfork;
 ///
 /// let mut precompiles = PrecompilesMap::default();
-/// extend_monad_precompiles_for_spec(&mut precompiles, MonadSpecId::MonadNine);
+/// extend_monad_precompiles_for_spec(&mut precompiles, MonadHardfork::MonadNine);
 /// ```
-pub fn extend_monad_precompiles_for_spec(precompiles: &mut PrecompilesMap, spec: MonadSpecId) {
+pub fn extend_monad_precompiles_for_spec(precompiles: &mut PrecompilesMap, spec: MonadHardfork) {
     extend_monad_staking_precompile(precompiles);
 
-    if MonadSpecId::MonadNine.is_enabled_in(spec) {
+    if MonadHardfork::MonadNine.is_enabled_in(spec) {
         extend_monad_reserve_balance_precompile(precompiles);
     } else {
         precompiles.apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| None);
@@ -541,7 +541,7 @@ mod tests {
         assert_precompiles_map_factory::<MonadEvmFactory>();
     }
 
-    fn factory_exposes_precompile(spec: MonadSpecId, address: Address) -> bool {
+    fn factory_exposes_precompile(spec: MonadHardfork, address: Address) -> bool {
         let evm = MonadEvmFactory.create_evm(
             revm::database::EmptyDB::default(),
             EvmEnv::new(CfgEnv::new_with_spec(spec), BlockEnv::default()),
@@ -558,9 +558,9 @@ mod tests {
     #[test]
     fn monad_factory_exposes_staking_precompile_address() {
         for spec in [
-            MonadSpecId::MonadEight,
-            MonadSpecId::MonadNine,
-            MonadSpecId::MonadNext,
+            MonadHardfork::MonadEight,
+            MonadHardfork::MonadNine,
+            MonadHardfork::MonadNext,
         ] {
             assert!(factory_exposes_precompile(spec, STAKING_ADDRESS));
         }
@@ -569,15 +569,15 @@ mod tests {
     #[test]
     fn monad_factory_exposes_reserve_balance_precompile_address_when_enabled() {
         assert!(!factory_exposes_precompile(
-            MonadSpecId::MonadEight,
+            MonadHardfork::MonadEight,
             RESERVE_BALANCE_ADDRESS
         ));
         assert!(factory_exposes_precompile(
-            MonadSpecId::MonadNine,
+            MonadHardfork::MonadNine,
             RESERVE_BALANCE_ADDRESS
         ));
         assert!(factory_exposes_precompile(
-            MonadSpecId::MonadNext,
+            MonadHardfork::MonadNext,
             RESERVE_BALANCE_ADDRESS
         ));
     }
@@ -585,9 +585,9 @@ mod tests {
     #[test]
     fn staking_precompile_is_available_on_all_monad_specs() {
         for spec in [
-            MonadSpecId::MonadEight,
-            MonadSpecId::MonadNine,
-            MonadSpecId::MonadNext,
+            MonadHardfork::MonadEight,
+            MonadHardfork::MonadNine,
+            MonadHardfork::MonadNext,
         ] {
             let precompiles = MonadPrecompilesMap::new_with_spec(spec);
             let addresses = precompiles.addresses().collect::<Vec<_>>();
@@ -599,9 +599,9 @@ mod tests {
 
     #[test]
     fn reserve_balance_precompile_is_gated_to_monad_nine_and_later() {
-        let monad_eight = MonadPrecompilesMap::new_with_spec(MonadSpecId::MonadEight);
-        let monad_nine = MonadPrecompilesMap::new_with_spec(MonadSpecId::MonadNine);
-        let monad_next = MonadPrecompilesMap::new_with_spec(MonadSpecId::MonadNext);
+        let monad_eight = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadEight);
+        let monad_nine = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadNine);
+        let monad_next = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadNext);
 
         assert!(!monad_eight.contains(&RESERVE_BALANCE_ADDRESS));
         assert!(!monad_eight
@@ -621,20 +621,20 @@ mod tests {
 
     #[test]
     fn set_spec_rebuilds_monad_only_precompile_set() {
-        let mut precompiles = MonadPrecompilesMap::new_with_spec(MonadSpecId::MonadEight);
+        let mut precompiles = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadEight);
 
         assert!(!precompiles.contains(&RESERVE_BALANCE_ADDRESS));
         assert!(
             PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
                 &mut precompiles,
-                MonadSpecId::MonadNine
+                MonadHardfork::MonadNine
             )
         );
         assert!(precompiles.contains(&RESERVE_BALANCE_ADDRESS));
         assert!(
             !PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
                 &mut precompiles,
-                MonadSpecId::MonadNine
+                MonadHardfork::MonadNine
             )
         );
     }
