@@ -32,9 +32,9 @@ option-if-let-else = "allow"
 redundant-clone = "warn"
 
 [dependencies]
-alloy-evm = { version = "=0.33.2", default-features = false }
-alloy-primitives = { version = "=1.5.2", default-features = false }
-revm = { version = "=38.0.0", default-features = false }
+alloy-evm = { version = "0.33.2", default-features = false }
+alloy-primitives = { version = "1.5.2", default-features = false }
+revm = { version = "38.0.0", default-features = false }
 monad-revm = { git = "https://github.com/category-labs/monad-revm.git", branch = "v1.7.0-monad", default-features = false }
 
 [dev-dependencies]
