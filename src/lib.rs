@@ -464,11 +464,14 @@ fn extend_monad_reserve_balance_precompile(precompiles: &mut PrecompilesMap) {
     precompiles.apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| {
         Some(DynPrecompile::new_stateful(
             PrecompileId::Custom("MonadReserveBalance".into()),
-            |_input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
+            |input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
                 // Runtime dispatch for this address is handled before `run_dynamic`;
                 // this entry keeps the exposed `PrecompilesMap` metadata complete.
-                Err(PrecompileError::Fatal(
-                    "reserve-balance execution requires MonadPrecompilesMap".into(),
+                Ok(PrecompileOutput::halt(
+                    PrecompileHalt::other_static(
+                        "reserve-balance execution requires MonadPrecompilesMap",
+                    ),
+                    input.reservoir,
                 ))
             },
         ))
@@ -617,6 +620,42 @@ mod tests {
         assert!(monad_next
             .addresses()
             .any(|address| address == RESERVE_BALANCE_ADDRESS));
+    }
+
+    #[test]
+    fn reserve_balance_metadata_precompile_halts_without_fatal_error() {
+        let monad_precompiles = MonadPrecompiles::new_with_spec(MonadHardfork::MonadNine);
+        let mut precompiles = PrecompilesMap::from_static(monad_precompiles.precompiles());
+        extend_monad_precompiles_for_spec(&mut precompiles, MonadHardfork::MonadNine);
+
+        let reserve_balance = precompiles
+            .get(&RESERVE_BALANCE_ADDRESS)
+            .expect("reserve-balance precompile should be exposed in MonadNine");
+        let mut context = monad_context_with_db(revm::database::EmptyDB::default());
+
+        let output = reserve_balance
+            .call(PrecompileInput {
+                data: &[],
+                gas: 100_000,
+                reservoir: 7,
+                caller: Address::ZERO,
+                value: U256::ZERO,
+                target_address: RESERVE_BALANCE_ADDRESS,
+                is_static: false,
+                bytecode_address: RESERVE_BALANCE_ADDRESS,
+                internals: EvmInternals::from_context(&mut context),
+            })
+            .expect("metadata precompile should halt without a fatal error");
+
+        let halt_reason = output
+            .halt_reason()
+            .expect("metadata precompile should halt");
+        assert!(!halt_reason.is_oog());
+        assert_eq!(
+            halt_reason.to_string(),
+            "reserve-balance execution requires MonadPrecompilesMap"
+        );
+        assert_eq!(output.reservoir, 7);
     }
 
     #[test]
