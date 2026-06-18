@@ -54,10 +54,10 @@ let evm = factory.create_evm(db, env);
 ```rust
 use alloy_evm::precompiles::PrecompilesMap;
 use alloy_monad_evm::extend_monad_precompiles_for_spec;
-use monad_revm::MonadSpecId;
+use monad_revm::MonadHardfork;
 
 let mut precompiles = PrecompilesMap::default();
-extend_monad_precompiles_for_spec(&mut precompiles, MonadSpecId::MonadNine);
+extend_monad_precompiles_for_spec(&mut precompiles, MonadHardfork::MonadNine);
 ```
 
 ## Crate surface
