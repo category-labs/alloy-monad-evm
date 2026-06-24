@@ -22,13 +22,14 @@ use monad_revm::{
     MonadBuilder, MonadCfgEnv, MonadEvm as InnerMonadEvm, MonadHardfork,
 };
 use revm::{
-    context::{BlockEnv, CfgEnv, TxEnv},
+    context::{BlockEnv, CfgEnv, DBErrorMarker, TxEnv},
     context_interface::result::{EVMError, HaltReason, ResultAndState},
     context_interface::{ContextTr, JournalTr, LocalContextTr},
     handler::{precompile_output_to_interpreter_result, PrecompileProvider},
     inspector::NoOpInspector,
     interpreter::{CallInputs, InstructionResult, InterpreterResult},
     precompile::{PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput},
+    primitives::AddressSet,
     Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
 };
 use std::ops::{Deref, DerefMut};
@@ -37,10 +38,11 @@ use std::ops::{Deref, DerefMut};
 pub use monad_revm::{handler::MonadHandler, MonadContext};
 
 /// Monad-aware precompile wrapper that works with `MonadJournal`.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct MonadPrecompilesMap {
     inner: PrecompilesMap,
     spec: MonadHardfork,
+    warm_addresses: AddressSet,
 }
 
 impl MonadPrecompilesMap {
@@ -49,18 +51,17 @@ impl MonadPrecompilesMap {
         let monad_precompiles = MonadPrecompiles::new_with_spec(spec);
         let mut inner = PrecompilesMap::from_static(monad_precompiles.precompiles());
         extend_monad_precompiles_for_spec(&mut inner, spec);
-        Self { inner, spec }
+        let warm_addresses = inner.addresses().copied().collect();
+        Self {
+            inner,
+            spec,
+            warm_addresses,
+        }
     }
 
     /// Returns the precompile addresses, including Monad-only precompiles.
     pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
-        let reserve_balance_enabled = MonadHardfork::MonadNine.is_enabled_in(self.spec);
-        std::iter::once(STAKING_ADDRESS)
-            .chain(reserve_balance_enabled.then_some(RESERVE_BALANCE_ADDRESS))
-            .chain(self.inner.addresses().copied().filter(move |address| {
-                *address != STAKING_ADDRESS
-                    && (!reserve_balance_enabled || *address != RESERVE_BALANCE_ADDRESS)
-            }))
+        self.warm_addresses.iter().copied()
     }
 
     /// Returns whether the address is a Monad precompile.
@@ -151,8 +152,8 @@ impl<DB: Database> PrecompileProvider<MonadContext<DB>> for MonadPrecompilesMap 
         self.run_dynamic(context, inputs)
     }
 
-    fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
-        Box::new(self.addresses())
+    fn warm_addresses(&self) -> &AddressSet {
+        &self.warm_addresses
     }
 
     fn contains(&self, address: &Address) -> bool {
@@ -312,7 +313,7 @@ impl EvmFactory for MonadEvmFactory {
     type Evm<DB: Database, I: Inspector<MonadContext<DB>>> = MonadEvm<DB, I>;
     type Context<DB: Database> = MonadContext<DB>;
     type Tx = TxEnv;
-    type Error<DBError: core::error::Error + Send + Sync + 'static> = EVMError<DBError>;
+    type Error<DBError: DBErrorMarker> = EVMError<DBError>;
     type HaltReason = HaltReason;
     type Spec = MonadHardfork;
     type BlockEnv = BlockEnv;
