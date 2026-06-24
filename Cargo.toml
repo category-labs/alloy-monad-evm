@@ -32,13 +32,16 @@ option-if-let-else = "allow"
 redundant-clone = "warn"
 
 [dependencies]
-alloy-evm = { version = "0.33.2", default-features = false }
-alloy-primitives = { version = "1.5.2", default-features = false }
-revm = { version = "38.0.0", default-features = false }
-monad-revm = { version = "0.4.0", default-features = false }
+alloy-evm = { version = "0.37.0", default-features = false }
+alloy-primitives = { version = "1.6.0", default-features = false }
+revm = { version = "41.0.0", default-features = false }
+monad-revm = { version = "0.3.0", default-features = false }
 
 [dev-dependencies]
 test-case = "3"
+
+[patch.crates-io]
+monad-revm = { git = "https://github.com/category-labs/monad-revm.git", rev = "271964742b4d0cb6e4c7256e39979587470fc2a2" }
 
 [features]
 default = ["std", "memory_limit"]
