@@ -12,6 +12,15 @@ For the staking precompile design and detailed semantics, see the `monad-revm` R
 
 - https://github.com/category-labs/monad-revm
 
+## Compatibility
+
+| Component | Version |
+|-----------|---------|
+| `alloy-evm` | `0.33.2` |
+| `monad-revm` | `0.4.0` |
+| `revm` | `38.0.0` |
+| Rust MSRV | `1.91` |
+
 ## What this crate adds on top of `monad-revm`
 
 1. `MonadEvm`: `alloy_evm::Evm` implementation wrapping `monad_revm::MonadEvm`.
@@ -26,7 +35,7 @@ For the staking precompile design and detailed semantics, see the `monad-revm` R
 - Ensures precompile-aware tooling behavior (for example, Foundry warm precompile handling and better revert diagnostics).
 - Routes write selectors through `monad_revm::staking::write::run_staking_write`.
 - Routes read selectors through `monad_revm::staking::run_staking_with_reader`.
-- Enforces direct-call behavior (`DELEGATECALL`/`CALLCODE` and static contexts are rejected in this integration path).
+- Enforces direct-call behavior (`DELEGATECALL`/`CALLCODE`, delegated top-level calls, and static contexts are rejected in this integration path).
 
 This keeps staking behavior centralized in one place (`monad-revm`) while allowing Alloy-based runtimes to execute the same semantics.
 
@@ -35,7 +44,14 @@ This keeps staking behavior centralized in one place (`monad-revm`) while allowi
 - Monad gas model (cold access repricing, no refunds).
 - Monad precompile repricing.
 - Staking precompile at `0x1000` (read + write + syscalls, via `monad-revm`).
-- Reserve-balance precompile metadata at `0x1001` for MonadNine and later.
+- Reserve-balance precompile execution and metadata at `0x1001` for MonadNine and later.
+
+## Installation
+
+```toml
+[dependencies]
+alloy-monad-evm = "0.4.0"
+```
 
 ## Usage
 
@@ -64,14 +80,16 @@ extend_monad_precompiles_for_spec(&mut precompiles, MonadHardfork::MonadNine);
 
 - `MonadEvm`
 - `MonadEvmFactory`
+- `MonadPrecompilesMap`
 - `MonadContext` (re-export from `monad-revm`)
 - `MonadHandler` (re-export from `monad-revm`)
 - `extend_monad_precompiles_for_spec`
 
 ## Feature flags
 
-- `std` (default)
-- `asm-keccak`
+- `std` (default): Enables standard-library support for `alloy-primitives`, `revm`, `alloy-evm`, and `monad-revm`.
+- `memory_limit` (default): Enables Monad MIP-3 memory-limit support through `monad-revm`.
+- `asm-keccak`: Enables assembly Keccak implementations in `alloy-evm`, `alloy-primitives`, and `revm`.
 
 ## License
 

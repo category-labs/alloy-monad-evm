@@ -1,7 +1,7 @@
 [package]
 name = "alloy-monad-evm"
 description = "Monad EVM implementation"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.91"
 authors = ["Haythem Sellami - Category Labs <hsellami@category.xyz>"]
@@ -41,7 +41,7 @@ monad-revm = { version = "0.3.0", default-features = false }
 test-case = "3"
 
 [patch.crates-io]
-monad-revm = { git = "https://github.com/category-labs/monad-revm.git", branch = "foundry-revm-41-compat" }
+monad-revm = { git = "https://github.com/category-labs/monad-revm.git", rev = "271964742b4d0cb6e4c7256e39979587470fc2a2" }
 
 [features]
 default = ["std", "memory_limit"]
