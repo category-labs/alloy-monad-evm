@@ -26,7 +26,7 @@ use revm::{
     context_interface::result::{EVMError, HaltReason, ResultAndState},
     context_interface::{ContextTr, JournalTr, LocalContextTr},
     handler::{precompile_output_to_interpreter_result, PrecompileProvider},
-    inspector::NoOpInspector,
+    inspector::{InspectSystemCallEvm, NoOpInspector},
     interpreter::{CallInputs, InstructionResult, InterpreterResult},
     precompile::{PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput},
     primitives::AddressSet,
@@ -262,7 +262,12 @@ where
         contract: Address,
         data: Bytes,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        self.inner.system_call_with_caller(caller, contract, data)
+        if self.inspect {
+            self.inner
+                .inspect_system_call_with_caller(caller, contract, data)
+        } else {
+            self.inner.system_call_with_caller(caller, contract, data)
+        }
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec, Self::BlockEnv>) {
@@ -537,12 +542,77 @@ impl StakingStorage for PrecompileInputStakingStorage<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use monad_revm::{api::block::syscall_snapshot_calldata, staking::constants::SYSTEM_ADDRESS};
+    use revm::{
+        bytecode::opcode,
+        database::InMemoryDB,
+        inspector::CountInspector,
+        state::{AccountInfo, Bytecode},
+    };
 
     fn assert_precompiles_map_factory<F: EvmFactory<Precompiles = PrecompilesMap>>() {}
 
     #[test]
     fn monad_factory_exposes_precompiles_map() {
         assert_precompiles_map_factory::<MonadEvmFactory>();
+    }
+
+    #[test]
+    fn system_call_inspection_matches_uninspected_execution() {
+        let caller = Address::from([0x11; 20]);
+        let contract = Address::from([0x22; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            contract,
+            AccountInfo::default().with_code(Bytecode::new_raw(Bytes::from(vec![
+                opcode::PUSH1,
+                0x01,
+                opcode::PUSH1,
+                0x00,
+                opcode::SSTORE,
+                opcode::STOP,
+            ]))),
+        );
+        let env = EvmEnv::new(
+            CfgEnv::new_with_spec(MonadHardfork::MonadNine),
+            BlockEnv::default(),
+        );
+
+        let mut uninspected = MonadEvmFactory.create_evm(db.clone(), env.clone());
+        let expected = uninspected
+            .transact_system_call(caller, contract, Bytes::new())
+            .expect("uninspected system call should succeed");
+
+        let mut inspected =
+            MonadEvmFactory.create_evm_with_inspector(db, env, CountInspector::default());
+        let actual = inspected
+            .transact_system_call(caller, contract, Bytes::new())
+            .expect("inspected system call should succeed");
+
+        assert_eq!(actual, expected);
+        assert!(actual.result.is_success());
+        assert!(!actual.state.is_empty());
+        assert!(inspected.components().1.call_count() > 0);
+        assert!(inspected.components().1.step_count() > 0);
+    }
+
+    #[test]
+    fn staking_system_call_invokes_inspector() {
+        let mut evm = MonadEvmFactory.create_evm_with_inspector(
+            revm::database::EmptyDB::default(),
+            EvmEnv::new(
+                CfgEnv::new_with_spec(MonadHardfork::MonadNine),
+                BlockEnv::default(),
+            ),
+            CountInspector::default(),
+        );
+
+        let result = evm
+            .transact_system_call(SYSTEM_ADDRESS, STAKING_ADDRESS, syscall_snapshot_calldata())
+            .expect("staking system call should succeed");
+
+        assert!(result.result.is_success());
+        assert!(evm.components().1.call_count() > 0);
     }
 
     fn factory_exposes_precompile(spec: MonadHardfork, address: Address) -> bool {
