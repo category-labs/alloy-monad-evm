@@ -90,7 +90,7 @@ fn runtime_monad_precompiles(runtime_spec: Arc<AtomicU8>) -> PrecompilesMap {
         let id = monad_eight.id().clone();
         let runtime_spec = Arc::clone(&runtime_spec);
         precompiles.apply_precompile(&address, |_| {
-            Some(DynPrecompile::new(id, move |input| {
+            Some(DynPrecompile::new_stateful(id, move |input| {
                 let precompile = match runtime_spec.load(Ordering::Relaxed) {
                     spec if spec == MonadHardfork::MonadEight as u8 => monad_eight,
                     spec if spec == MonadHardfork::MonadNine as u8 => monad_nine,
@@ -884,6 +884,22 @@ mod tests {
                 MonadHardfork::MonadNine
             )
         );
+    }
+
+    #[test]
+    fn runtime_selected_protocol_precompiles_do_not_support_caching() {
+        let runtime_spec = Arc::new(AtomicU8::new(MonadHardfork::MonadEight as u8));
+        let precompiles = runtime_monad_precompiles(runtime_spec);
+
+        for address in static_monad_precompiles(MonadHardfork::MonadEight).addresses() {
+            let precompile = precompiles
+                .get(address)
+                .expect("runtime-selected protocol precompile should be present");
+            assert!(
+                !precompile.supports_caching(),
+                "runtime-selected precompile at {address} must not be cached"
+            );
+        }
     }
 
     #[test]
