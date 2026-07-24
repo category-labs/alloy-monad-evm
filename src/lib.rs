@@ -32,29 +32,98 @@ use revm::{
     primitives::AddressSet,
     Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
 };
-use std::ops::{Deref, DerefMut};
+use std::{
+    ops::{Deref, DerefMut},
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc, OnceLock,
+    },
+};
 
 // Re-export monad-revm types for external users
 pub use monad_revm::{handler::MonadHandler, MonadContext};
+
+const MONAD_RESERVE_BALANCE_ID: &str = "MonadReserveBalance";
+
+fn static_monad_precompiles(spec: MonadHardfork) -> &'static revm::precompile::Precompiles {
+    static MONAD_EIGHT: OnceLock<&'static revm::precompile::Precompiles> = OnceLock::new();
+    static MONAD_NINE: OnceLock<&'static revm::precompile::Precompiles> = OnceLock::new();
+    static MONAD_NEXT: OnceLock<&'static revm::precompile::Precompiles> = OnceLock::new();
+
+    let precompiles = match spec {
+        MonadHardfork::MonadEight => &MONAD_EIGHT,
+        MonadHardfork::MonadNine => &MONAD_NINE,
+        MonadHardfork::MonadNext => &MONAD_NEXT,
+    };
+    precompiles.get_or_init(|| MonadPrecompiles::new_with_spec(spec).precompiles())
+}
+
+fn runtime_monad_precompiles(runtime_spec: Arc<AtomicU8>) -> PrecompilesMap {
+    let monad_eight = static_monad_precompiles(MonadHardfork::MonadEight);
+    let monad_nine = static_monad_precompiles(MonadHardfork::MonadNine);
+    let monad_next = static_monad_precompiles(MonadHardfork::MonadNext);
+
+    let same_addresses = |other: &'static revm::precompile::Precompiles| {
+        monad_eight
+            .addresses()
+            .all(|address| other.contains(address))
+            && other
+                .addresses()
+                .all(|address| monad_eight.contains(address))
+    };
+    assert!(
+        same_addresses(monad_nine) && same_addresses(monad_next),
+        "runtime Monad precompile selection requires stable protocol addresses"
+    );
+
+    let mut precompiles = PrecompilesMap::from_static(monad_eight);
+    for address in monad_eight.addresses().copied().collect::<Vec<_>>() {
+        let monad_eight = monad_eight
+            .get(&address)
+            .expect("MonadEight precompile address should be present");
+        let monad_nine = monad_nine
+            .get(&address)
+            .expect("MonadNine precompile address should be present");
+        let monad_next = monad_next
+            .get(&address)
+            .expect("MonadNext precompile address should be present");
+        let id = monad_eight.id().clone();
+        let runtime_spec = Arc::clone(&runtime_spec);
+        precompiles.apply_precompile(&address, |_| {
+            Some(DynPrecompile::new(id, move |input| {
+                let precompile = match runtime_spec.load(Ordering::Relaxed) {
+                    spec if spec == MonadHardfork::MonadEight as u8 => monad_eight,
+                    spec if spec == MonadHardfork::MonadNine as u8 => monad_nine,
+                    spec if spec == MonadHardfork::MonadNext as u8 => monad_next,
+                    spec => unreachable!("invalid runtime Monad hardfork discriminant: {spec}"),
+                };
+                precompile.execute(input.data, input.gas, input.reservoir)
+            }))
+        });
+    }
+    precompiles
+}
 
 /// Monad-aware precompile wrapper that works with `MonadJournal`.
 #[derive(Debug)]
 pub struct MonadPrecompilesMap {
     inner: PrecompilesMap,
     spec: MonadHardfork,
+    runtime_spec: Arc<AtomicU8>,
     warm_addresses: AddressSet,
 }
 
 impl MonadPrecompilesMap {
     /// Create a new Monad precompile map for the given spec.
     pub fn new_with_spec(spec: MonadHardfork) -> Self {
-        let monad_precompiles = MonadPrecompiles::new_with_spec(spec);
-        let mut inner = PrecompilesMap::from_static(monad_precompiles.precompiles());
+        let runtime_spec = Arc::new(AtomicU8::new(spec as u8));
+        let mut inner = runtime_monad_precompiles(Arc::clone(&runtime_spec));
         extend_monad_precompiles_for_spec(&mut inner, spec);
         let warm_addresses = inner.addresses().copied().collect();
         Self {
             inner,
             spec,
+            runtime_spec,
             warm_addresses,
         }
     }
@@ -70,6 +139,35 @@ impl MonadPrecompilesMap {
             || (MonadHardfork::MonadNine.is_enabled_in(self.spec)
                 && *address == RESERVE_BALANCE_ADDRESS)
             || self.inner.get(address).is_some()
+    }
+
+    fn update_reserve_balance_precompile(&mut self) {
+        if MonadHardfork::MonadNine.is_enabled_in(self.spec) {
+            self.inner
+                .apply_precompile(&RESERVE_BALANCE_ADDRESS, |precompile| {
+                    precompile.or_else(|| Some(monad_reserve_balance_precompile()))
+                });
+        } else {
+            self.inner
+                .apply_precompile(&RESERVE_BALANCE_ADDRESS, |precompile| {
+                    precompile.filter(|precompile| {
+                        precompile.precompile_id().name() != MONAD_RESERVE_BALANCE_ID
+                    })
+                });
+        }
+    }
+
+    fn sync_warm_addresses(&mut self) -> bool {
+        let mut warm_addresses = self.inner.addresses().copied().collect::<AddressSet>();
+        warm_addresses.insert(STAKING_ADDRESS);
+        if MonadHardfork::MonadNine.is_enabled_in(self.spec) {
+            warm_addresses.insert(RESERVE_BALANCE_ADDRESS);
+        }
+        if warm_addresses == self.warm_addresses {
+            return false;
+        }
+        self.warm_addresses = warm_addresses;
+        true
     }
 
     fn run_dynamic<DB: Database>(
@@ -129,11 +227,13 @@ impl<DB: Database> PrecompileProvider<MonadContext<DB>> for MonadPrecompilesMap 
     type Output = InterpreterResult;
 
     fn set_spec(&mut self, spec: MonadHardfork) -> bool {
-        if spec == self.spec {
-            return false;
+        let spec_changed = spec != self.spec;
+        if spec_changed {
+            self.spec = spec;
+            self.runtime_spec.store(spec as u8, Ordering::Relaxed);
+            self.update_reserve_balance_precompile();
         }
-        *self = Self::new_with_spec(spec);
-        true
+        spec_changed | self.sync_warm_addresses()
     }
 
     fn run(
@@ -468,20 +568,24 @@ fn extend_monad_staking_precompile(precompiles: &mut PrecompilesMap) {
 
 fn extend_monad_reserve_balance_precompile(precompiles: &mut PrecompilesMap) {
     precompiles.apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| {
-        Some(DynPrecompile::new_stateful(
-            PrecompileId::Custom("MonadReserveBalance".into()),
-            |input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
-                // Runtime dispatch for this address is handled before `run_dynamic`;
-                // this entry keeps the exposed `PrecompilesMap` metadata complete.
-                Ok(PrecompileOutput::halt(
-                    PrecompileHalt::other_static(
-                        "reserve-balance execution requires MonadPrecompilesMap",
-                    ),
-                    input.reservoir,
-                ))
-            },
-        ))
+        Some(monad_reserve_balance_precompile())
     });
+}
+
+fn monad_reserve_balance_precompile() -> DynPrecompile {
+    DynPrecompile::new_stateful(
+        PrecompileId::Custom(MONAD_RESERVE_BALANCE_ID.into()),
+        |input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
+            // Runtime dispatch for this address is handled before `run_dynamic`;
+            // this entry keeps the exposed `PrecompilesMap` metadata complete.
+            Ok(PrecompileOutput::halt(
+                PrecompileHalt::other_static(
+                    "reserve-balance execution requires MonadPrecompilesMap",
+                ),
+                input.reservoir,
+            ))
+        },
+    )
 }
 
 /// Convert an `InterpreterResult` to a `PrecompileOutput`.
@@ -547,6 +651,7 @@ mod tests {
         bytecode::opcode,
         database::InMemoryDB,
         inspector::CountInspector,
+        precompile::u64_to_address,
         state::{AccountInfo, Bytecode},
     };
 
@@ -729,8 +834,40 @@ mod tests {
         assert_eq!(output.reservoir, 7);
     }
 
+    fn modexp_input(base: &[u8], exponent: &[u8], modulus: &[u8]) -> Vec<u8> {
+        let mut input = Vec::with_capacity(96 + base.len() + exponent.len() + modulus.len());
+        input.extend_from_slice(&U256::from(base.len()).to_be_bytes::<32>());
+        input.extend_from_slice(&U256::from(exponent.len()).to_be_bytes::<32>());
+        input.extend_from_slice(&U256::from(modulus.len()).to_be_bytes::<32>());
+        input.extend_from_slice(base);
+        input.extend_from_slice(exponent);
+        input.extend_from_slice(modulus);
+        input
+    }
+
+    fn execute_modexp(precompiles: &MonadPrecompilesMap, input: &[u8]) -> PrecompileOutput {
+        let precompile = precompiles
+            .inner
+            .get(&u64_to_address(5))
+            .expect("MODEXP precompile should be present");
+        let mut context = monad_context_with_db(revm::database::EmptyDB::default());
+        precompile
+            .call(PrecompileInput {
+                data: input,
+                gas: 10_000_000,
+                reservoir: 0,
+                caller: Address::ZERO,
+                value: U256::ZERO,
+                target_address: u64_to_address(5),
+                is_static: false,
+                bytecode_address: u64_to_address(5),
+                internals: EvmInternals::from_context(&mut context),
+            })
+            .expect("MODEXP execution should succeed")
+    }
+
     #[test]
-    fn set_spec_rebuilds_monad_only_precompile_set() {
+    fn set_spec_updates_monad_only_precompile_set() {
         let mut precompiles = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadEight);
 
         assert!(!precompiles.contains(&RESERVE_BALANCE_ADDRESS));
@@ -747,5 +884,73 @@ mod tests {
                 MonadHardfork::MonadNine
             )
         );
+    }
+
+    #[test]
+    fn set_spec_selects_modexp_pricing_in_both_directions() {
+        let input = modexp_input(&[0xff; 32], &[0xff; 32], &[0xff; 32]);
+        let mut precompiles = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadEight);
+
+        let monad_eight_gas = execute_modexp(&precompiles, &input).gas_used;
+        assert!(
+            PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
+                &mut precompiles,
+                MonadHardfork::MonadNine
+            )
+        );
+        let monad_nine_gas = execute_modexp(&precompiles, &input).gas_used;
+        assert!(
+            monad_nine_gas > monad_eight_gas,
+            "MonadNine MODEXP gas should exceed MonadEight"
+        );
+
+        assert!(
+            PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
+                &mut precompiles,
+                MonadHardfork::MonadEight
+            )
+        );
+        assert_eq!(
+            execute_modexp(&precompiles, &input).gas_used,
+            monad_eight_gas
+        );
+    }
+
+    #[test]
+    fn set_spec_preserves_injected_precompiles_and_overrides() {
+        let custom_address = Address::from([0x44; 20]);
+        let modexp_address = u64_to_address(5);
+        let mut precompiles = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadEight);
+        precompiles.inner.apply_precompile(&custom_address, |_| {
+            Some(DynPrecompile::new(
+                PrecompileId::Custom("InjectedPrecompile".into()),
+                |input| Ok(PrecompileOutput::new(17, Bytes::new(), input.reservoir)),
+            ))
+        });
+        precompiles.inner.apply_precompile(&modexp_address, |_| {
+            Some(DynPrecompile::new(
+                PrecompileId::Custom("ModexpOverride".into()),
+                |input| Ok(PrecompileOutput::new(23, Bytes::new(), input.reservoir)),
+            ))
+        });
+
+        assert!(
+            PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
+                &mut precompiles,
+                MonadHardfork::MonadNine
+            )
+        );
+        assert!(precompiles.inner.get(&custom_address).is_some());
+        assert!(precompiles.warm_addresses.contains(&custom_address));
+        assert_eq!(execute_modexp(&precompiles, &[]).gas_used, 23);
+
+        assert!(
+            PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
+                &mut precompiles,
+                MonadHardfork::MonadEight
+            )
+        );
+        assert!(precompiles.inner.get(&custom_address).is_some());
+        assert_eq!(execute_modexp(&precompiles, &[]).gas_used, 23);
     }
 }
