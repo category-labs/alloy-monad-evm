@@ -41,7 +41,7 @@ monad-revm = { version = "0.3.0", default-features = false }
 test-case = "3"
 
 [patch.crates-io]
-monad-revm = { git = "https://github.com/category-labs/monad-revm.git", rev = "c3a8a3c745750159c6887c67ef50964596194c8d" }
+monad-revm = { git = "https://github.com/category-labs/monad-revm.git", rev = "704889928d3e0d8b75111a81676ff2b9fcf33df6" }
 
 [features]
 default = ["std", "memory_limit"]
