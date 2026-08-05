@@ -878,10 +878,23 @@ mod tests {
             )
         );
         assert!(precompiles.contains(&RESERVE_BALANCE_ADDRESS));
+        assert!(precompiles
+            .warm_addresses
+            .contains(&RESERVE_BALANCE_ADDRESS));
+        assert!(
+            PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
+                &mut precompiles,
+                MonadHardfork::MonadEight
+            )
+        );
+        assert!(!precompiles.contains(&RESERVE_BALANCE_ADDRESS));
+        assert!(!precompiles
+            .warm_addresses
+            .contains(&RESERVE_BALANCE_ADDRESS));
         assert!(
             !PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
                 &mut precompiles,
-                MonadHardfork::MonadNine
+                MonadHardfork::MonadEight
             )
         );
     }
@@ -949,6 +962,14 @@ mod tests {
                 |input| Ok(PrecompileOutput::new(23, Bytes::new(), input.reservoir)),
             ))
         });
+        precompiles
+            .inner
+            .apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| {
+                Some(DynPrecompile::new(
+                    PrecompileId::Custom("ReserveBalanceOverride".into()),
+                    |input| Ok(PrecompileOutput::new(29, Bytes::new(), input.reservoir)),
+                ))
+            });
 
         assert!(
             PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
@@ -959,6 +980,15 @@ mod tests {
         assert!(precompiles.inner.get(&custom_address).is_some());
         assert!(precompiles.warm_addresses.contains(&custom_address));
         assert_eq!(execute_modexp(&precompiles, &[]).gas_used, 23);
+        assert_eq!(
+            precompiles
+                .inner
+                .get(&RESERVE_BALANCE_ADDRESS)
+                .expect("reserve balance override should be preserved")
+                .precompile_id()
+                .name(),
+            "ReserveBalanceOverride"
+        );
 
         assert!(
             PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
@@ -968,5 +998,14 @@ mod tests {
         );
         assert!(precompiles.inner.get(&custom_address).is_some());
         assert_eq!(execute_modexp(&precompiles, &[]).gas_used, 23);
+        assert_eq!(
+            precompiles
+                .inner
+                .get(&RESERVE_BALANCE_ADDRESS)
+                .expect("reserve balance override should survive the round trip")
+                .precompile_id()
+                .name(),
+            "ReserveBalanceOverride"
+        );
     }
 }
