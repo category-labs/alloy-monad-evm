@@ -8,6 +8,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   publish:
     name: publish alloy-monad-evm
@@ -19,20 +22,54 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install 1.91 --profile minimal --component clippy --component rustfmt
 
+      - name: Install bare-metal target
+        run: rustup target add thumbv7em-none-eabi
+
       - uses: Swatinem/rust-cache@v2
 
+      - name: Verify release tag
+        shell: bash
+        run: |
+          crate_version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "alloy-monad-evm") | .version'
+          )"
+          expected_tag="v${crate_version}"
+          if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match alloy-monad-evm ${crate_version}"
+            exit 1
+          fi
+
       - name: Test all features
-        run: cargo test --all-features
+        run: cargo test --locked --all-features
 
       - name: Test no default features
-        run: cargo test --no-default-features
+        run: cargo test --locked --no-default-features
+
+      - name: Check bare-metal no_std
+        run: cargo check --locked --lib --no-default-features --target thumbv7em-none-eabi
+
+      - name: Check bare-metal no_std with memory limit
+        run: >-
+          cargo check --locked --lib --no-default-features --features memory_limit
+          --target thumbv7em-none-eabi
 
       - name: Publish dry run
-        run: cargo publish -p alloy-monad-evm --dry-run
+        run: cargo publish -p alloy-monad-evm --locked --dry-run
+
+      - name: Publish to crates.io
+        run: cargo publish -p alloy-monad-evm --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-      - name: Publish to crates.io
-        run: cargo publish -p alloy-monad-evm
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+  release:
+    name: create GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
