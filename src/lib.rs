@@ -43,7 +43,19 @@ use std::{
 // Re-export monad-revm types for external users
 pub use monad_revm::{handler::MonadHandler, MonadContext};
 
+const MONAD_STAKING_ID: &str = "MonadStaking";
 const MONAD_RESERVE_BALANCE_ID: &str = "MonadReserveBalance";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReserveBalanceManagement {
+    Managed,
+    Overridden,
+    Removed,
+}
+
+fn is_native_monad_id(id: &PrecompileId, expected: &str) -> bool {
+    matches!(id, PrecompileId::Custom(name) if name.as_ref() == expected)
+}
 
 fn static_monad_precompiles(spec: MonadHardfork) -> &'static revm::precompile::Precompiles {
     static MONAD_EIGHT: OnceLock<&'static revm::precompile::Precompiles> = OnceLock::new();
@@ -87,6 +99,10 @@ fn runtime_monad_precompiles(runtime_spec: Arc<AtomicU8>) -> PrecompilesMap {
         let monad_next = monad_next
             .get(&address)
             .expect("MonadNext precompile address should be present");
+        assert!(
+            monad_eight.id() == monad_nine.id() && monad_eight.id() == monad_next.id(),
+            "runtime Monad precompile selection requires stable protocol identifiers"
+        );
         let id = monad_eight.id().clone();
         let runtime_spec = Arc::clone(&runtime_spec);
         precompiles.apply_precompile(&address, |_| {
@@ -105,12 +121,19 @@ fn runtime_monad_precompiles(runtime_spec: Arc<AtomicU8>) -> PrecompilesMap {
 }
 
 /// Monad-aware precompile wrapper that works with `MonadJournal`.
+///
+/// Custom replacements for the staking and reserve-balance addresses must use identifiers other
+/// than `MonadStaking` and `MonadReserveBalance`. Those identifiers are reserved for native
+/// entries because they select handlers that require the full Monad execution context.
+/// The native reserve-balance entry cannot be moved to another address because its protocol
+/// behavior also requires that context; replace it with a custom precompile before moving it.
 #[derive(Debug)]
 pub struct MonadPrecompilesMap {
     inner: PrecompilesMap,
     spec: MonadHardfork,
     runtime_spec: Arc<AtomicU8>,
-    warm_addresses: AddressSet,
+    reserve_balance_management: ReserveBalanceManagement,
+    modified: bool,
 }
 
 impl MonadPrecompilesMap {
@@ -119,29 +142,40 @@ impl MonadPrecompilesMap {
         let runtime_spec = Arc::new(AtomicU8::new(spec as u8));
         let mut inner = runtime_monad_precompiles(Arc::clone(&runtime_spec));
         extend_monad_precompiles_for_spec(&mut inner, spec);
-        let warm_addresses = inner.addresses().copied().collect();
         Self {
             inner,
             spec,
             runtime_spec,
-            warm_addresses,
+            reserve_balance_management: ReserveBalanceManagement::Managed,
+            modified: false,
         }
     }
 
     /// Returns the precompile addresses, including Monad-only precompiles.
     pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
-        self.warm_addresses.iter().copied()
+        self.inner.addresses().copied()
     }
 
     /// Returns whether the address is a Monad precompile.
     pub fn contains(&self, address: &Address) -> bool {
-        *address == STAKING_ADDRESS
-            || (MonadHardfork::MonadNine.is_enabled_in(self.spec)
-                && *address == RESERVE_BALANCE_ADDRESS)
-            || self.inner.get(address).is_some()
+        self.inner.get(address).is_some()
+    }
+
+    fn contains_native_precompile(&self, address: &Address, id: &str) -> bool {
+        self.inner
+            .get(address)
+            .is_some_and(|precompile| is_native_monad_id(precompile.precompile_id(), id))
+    }
+
+    fn inner_warm_addresses(&self) -> &AddressSet {
+        <PrecompilesMap as PrecompileProvider<Context>>::warm_addresses(&self.inner)
     }
 
     fn update_reserve_balance_precompile(&mut self) {
+        if self.reserve_balance_management != ReserveBalanceManagement::Managed {
+            return;
+        }
+
         if MonadHardfork::MonadNine.is_enabled_in(self.spec) {
             self.inner
                 .apply_precompile(&RESERVE_BALANCE_ADDRESS, |precompile| {
@@ -151,23 +185,28 @@ impl MonadPrecompilesMap {
             self.inner
                 .apply_precompile(&RESERVE_BALANCE_ADDRESS, |precompile| {
                     precompile.filter(|precompile| {
-                        precompile.precompile_id().name() != MONAD_RESERVE_BALANCE_ID
+                        !is_native_monad_id(precompile.precompile_id(), MONAD_RESERVE_BALANCE_ID)
                     })
                 });
         }
     }
 
-    fn sync_warm_addresses(&mut self) -> bool {
-        let mut warm_addresses = self.inner.addresses().copied().collect::<AddressSet>();
-        warm_addresses.insert(STAKING_ADDRESS);
-        if MonadHardfork::MonadNine.is_enabled_in(self.spec) {
-            warm_addresses.insert(RESERVE_BALANCE_ADDRESS);
-        }
-        if warm_addresses == self.warm_addresses {
-            return false;
-        }
-        self.warm_addresses = warm_addresses;
-        true
+    fn reconcile_reserve_balance_management(&mut self) {
+        self.reserve_balance_management = match self.inner.get(&RESERVE_BALANCE_ADDRESS) {
+            Some(precompile)
+                if is_native_monad_id(precompile.precompile_id(), MONAD_RESERVE_BALANCE_ID) =>
+            {
+                ReserveBalanceManagement::Managed
+            }
+            Some(_) => ReserveBalanceManagement::Overridden,
+            None if MonadHardfork::MonadNine.is_enabled_in(self.spec) => {
+                ReserveBalanceManagement::Removed
+            }
+            None if self.reserve_balance_management == ReserveBalanceManagement::Overridden => {
+                ReserveBalanceManagement::Managed
+            }
+            None => self.reserve_balance_management,
+        };
     }
 
     fn run_dynamic<DB: Database>(
@@ -219,6 +258,7 @@ impl Deref for MonadPrecompilesMap {
 
 impl DerefMut for MonadPrecompilesMap {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        self.modified = true;
         &mut self.inner
     }
 }
@@ -228,12 +268,16 @@ impl<DB: Database> PrecompileProvider<MonadContext<DB>> for MonadPrecompilesMap 
 
     fn set_spec(&mut self, spec: MonadHardfork) -> bool {
         let spec_changed = spec != self.spec;
+        let modified = core::mem::take(&mut self.modified);
+        if modified {
+            self.reconcile_reserve_balance_management();
+        }
         if spec_changed {
             self.spec = spec;
             self.runtime_spec.store(spec as u8, Ordering::Relaxed);
             self.update_reserve_balance_precompile();
         }
-        spec_changed | self.sync_warm_addresses()
+        spec_changed || modified
     }
 
     fn run(
@@ -241,19 +285,28 @@ impl<DB: Database> PrecompileProvider<MonadContext<DB>> for MonadPrecompilesMap 
         context: &mut MonadContext<DB>,
         inputs: &CallInputs,
     ) -> Result<Option<Self::Output>, String> {
-        if let Some(result) = staking::run_staking_precompile(context, inputs)? {
-            return Ok(Some(result));
+        if inputs.bytecode_address == STAKING_ADDRESS
+            && self.contains_native_precompile(&inputs.bytecode_address, MONAD_STAKING_ID)
+        {
+            if let Some(result) = staking::run_staking_precompile(context, inputs)? {
+                return Ok(Some(result));
+            }
         }
 
-        if let Some(result) = reserve_balance::run_reserve_balance_precompile(context, inputs)? {
-            return Ok(Some(result));
+        if inputs.bytecode_address == RESERVE_BALANCE_ADDRESS
+            && self.contains_native_precompile(&inputs.bytecode_address, MONAD_RESERVE_BALANCE_ID)
+        {
+            if let Some(result) = reserve_balance::run_reserve_balance_precompile(context, inputs)?
+            {
+                return Ok(Some(result));
+            }
         }
 
         self.run_dynamic(context, inputs)
     }
 
     fn warm_addresses(&self) -> &AddressSet {
-        &self.warm_addresses
+        self.inner_warm_addresses()
     }
 
     fn contains(&self, address: &Address) -> bool {
@@ -473,6 +526,7 @@ impl EvmFactory for MonadEvmFactory {
 /// This explicitly registers Monad-only addresses in the exposed
 /// `PrecompilesMap` so Foundry diagnostics and warm-address logic see the same
 /// precompile set that `MonadPrecompilesMap` dispatches internally.
+/// Existing custom entries at Monad protocol addresses are preserved.
 ///
 /// # Example
 ///
@@ -490,14 +544,21 @@ pub fn extend_monad_precompiles_for_spec(precompiles: &mut PrecompilesMap, spec:
     if MonadHardfork::MonadNine.is_enabled_in(spec) {
         extend_monad_reserve_balance_precompile(precompiles);
     } else {
-        precompiles.apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| None);
+        precompiles.apply_precompile(&RESERVE_BALANCE_ADDRESS, |precompile| {
+            precompile.filter(|precompile| {
+                !is_native_monad_id(precompile.precompile_id(), MONAD_RESERVE_BALANCE_ID)
+            })
+        });
     }
 }
 
 fn extend_monad_staking_precompile(precompiles: &mut PrecompilesMap) {
+    if precompiles.get(&STAKING_ADDRESS).is_some() {
+        return;
+    }
     precompiles.apply_precompile(&STAKING_ADDRESS, |_| {
         Some(DynPrecompile::new_stateful(
-            PrecompileId::Custom("MonadStaking".into()),
+            PrecompileId::Custom(MONAD_STAKING_ID.into()),
             |input: PrecompileInput<'_>| -> Result<PrecompileOutput, PrecompileError> {
                 // Reject DELEGATECALL/CALLCODE (target_address != bytecode_address)
                 if !input.is_direct_call() {
@@ -567,6 +628,9 @@ fn extend_monad_staking_precompile(precompiles: &mut PrecompilesMap) {
 }
 
 fn extend_monad_reserve_balance_precompile(precompiles: &mut PrecompilesMap) {
+    if precompiles.get(&RESERVE_BALANCE_ADDRESS).is_some() {
+        return;
+    }
     precompiles.apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| {
         Some(monad_reserve_balance_precompile())
     });
@@ -649,13 +713,82 @@ mod tests {
     use monad_revm::{api::block::syscall_snapshot_calldata, staking::constants::SYSTEM_ADDRESS};
     use revm::{
         bytecode::opcode,
-        database::InMemoryDB,
+        database::{EmptyDB, InMemoryDB},
         inspector::CountInspector,
+        interpreter::{CallInput, CallScheme, CallValue},
         precompile::u64_to_address,
+        primitives::B256,
         state::{AccountInfo, Bytecode},
     };
 
     fn assert_precompiles_map_factory<F: EvmFactory<Precompiles = PrecompilesMap>>() {}
+
+    fn set_spec(precompiles: &mut MonadPrecompilesMap, spec: MonadHardfork) -> bool {
+        PrecompileProvider::<MonadContext<EmptyDB>>::set_spec(precompiles, spec)
+    }
+
+    fn call_inputs(address: Address, input: Bytes) -> CallInputs {
+        CallInputs {
+            input: CallInput::Bytes(input),
+            return_memory_offset: 0..0,
+            gas_limit: 100_000,
+            reservoir: 0,
+            bytecode_address: address,
+            known_bytecode: (B256::ZERO, Bytecode::default()),
+            target_address: address,
+            caller: Address::ZERO,
+            value: CallValue::Transfer(U256::ZERO),
+            scheme: CallScheme::Call,
+            is_static: false,
+            charged_new_account_state_gas: false,
+        }
+    }
+
+    fn run_precompile(
+        precompiles: &mut MonadPrecompilesMap,
+        spec: MonadHardfork,
+        address: Address,
+        input: Bytes,
+    ) -> Option<InterpreterResult> {
+        let mut context =
+            monad_context_with_db(EmptyDB::default()).with_cfg(MonadCfgEnv::new_with_spec(spec));
+        PrecompileProvider::<MonadContext<EmptyDB>>::run(
+            precompiles,
+            &mut context,
+            &call_inputs(address, input),
+        )
+        .expect("precompile execution should not fail fatally")
+    }
+
+    fn custom_precompile(id: &'static str, gas_used: u64, output: &'static [u8]) -> DynPrecompile {
+        let output = Bytes::from_static(output);
+        DynPrecompile::new(PrecompileId::Custom(id.into()), move |input| {
+            Ok(PrecompileOutput::new(
+                gas_used,
+                output.clone(),
+                input.reservoir,
+            ))
+        })
+    }
+
+    fn assert_custom_result(result: InterpreterResult, gas_used: u64, output: &'static [u8]) {
+        assert_eq!(result.result, InstructionResult::Return);
+        assert_eq!(result.gas.total_gas_spent(), gas_used);
+        assert_eq!(result.output, Bytes::from_static(output));
+    }
+
+    fn assert_precompile_absent(
+        precompiles: &mut MonadPrecompilesMap,
+        spec: MonadHardfork,
+        address: Address,
+    ) {
+        assert!(!MonadPrecompilesMap::contains(precompiles, &address));
+        assert!(!precompiles
+            .addresses()
+            .any(|candidate| candidate == address));
+        assert!(!precompiles.inner_warm_addresses().contains(&address));
+        assert!(run_precompile(precompiles, spec, address, Bytes::new()).is_none());
+    }
 
     #[test]
     fn monad_factory_exposes_precompiles_map() {
@@ -871,32 +1004,17 @@ mod tests {
         let mut precompiles = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadEight);
 
         assert!(!precompiles.contains(&RESERVE_BALANCE_ADDRESS));
-        assert!(
-            PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
-                &mut precompiles,
-                MonadHardfork::MonadNine
-            )
-        );
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadNine));
         assert!(precompiles.contains(&RESERVE_BALANCE_ADDRESS));
         assert!(precompiles
-            .warm_addresses
+            .inner_warm_addresses()
             .contains(&RESERVE_BALANCE_ADDRESS));
-        assert!(
-            PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
-                &mut precompiles,
-                MonadHardfork::MonadEight
-            )
-        );
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadEight));
         assert!(!precompiles.contains(&RESERVE_BALANCE_ADDRESS));
         assert!(!precompiles
-            .warm_addresses
+            .inner_warm_addresses()
             .contains(&RESERVE_BALANCE_ADDRESS));
-        assert!(
-            !PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
-                &mut precompiles,
-                MonadHardfork::MonadEight
-            )
-        );
+        assert!(!set_spec(&mut precompiles, MonadHardfork::MonadEight));
     }
 
     #[test]
@@ -921,24 +1039,14 @@ mod tests {
         let mut precompiles = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadEight);
 
         let monad_eight_gas = execute_modexp(&precompiles, &input).gas_used;
-        assert!(
-            PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
-                &mut precompiles,
-                MonadHardfork::MonadNine
-            )
-        );
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadNine));
         let monad_nine_gas = execute_modexp(&precompiles, &input).gas_used;
         assert!(
             monad_nine_gas > monad_eight_gas,
             "MonadNine MODEXP gas should exceed MonadEight"
         );
 
-        assert!(
-            PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
-                &mut precompiles,
-                MonadHardfork::MonadEight
-            )
-        );
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadEight));
         assert_eq!(
             execute_modexp(&precompiles, &input).gas_used,
             monad_eight_gas
@@ -950,62 +1058,222 @@ mod tests {
         let custom_address = Address::from([0x44; 20]);
         let modexp_address = u64_to_address(5);
         let mut precompiles = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadEight);
-        precompiles.inner.apply_precompile(&custom_address, |_| {
-            Some(DynPrecompile::new(
-                PrecompileId::Custom("InjectedPrecompile".into()),
-                |input| Ok(PrecompileOutput::new(17, Bytes::new(), input.reservoir)),
-            ))
+        precompiles.apply_precompile(&custom_address, |_| {
+            Some(custom_precompile("InjectedPrecompile", 17, b"custom"))
         });
-        precompiles.inner.apply_precompile(&modexp_address, |_| {
-            Some(DynPrecompile::new(
-                PrecompileId::Custom("ModexpOverride".into()),
-                |input| Ok(PrecompileOutput::new(23, Bytes::new(), input.reservoir)),
-            ))
+        precompiles.apply_precompile(&modexp_address, |_| {
+            Some(custom_precompile("ModexpOverride", 23, b"modexp"))
         });
-        precompiles
-            .inner
-            .apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| {
-                Some(DynPrecompile::new(
-                    PrecompileId::Custom("ReserveBalanceOverride".into()),
-                    |input| Ok(PrecompileOutput::new(29, Bytes::new(), input.reservoir)),
-                ))
+        precompiles.apply_precompile(&STAKING_ADDRESS, |_| {
+            Some(custom_precompile("StakingOverride", 27, b"staking"))
+        });
+        precompiles.apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| {
+            Some(custom_precompile("ReserveBalanceOverride", 29, b"reserve"))
+        });
+
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadNine));
+        assert!(precompiles.inner.get(&custom_address).is_some());
+        assert!(precompiles.inner_warm_addresses().contains(&custom_address));
+        assert_eq!(execute_modexp(&precompiles, &[]).gas_used, 23);
+        assert_custom_result(
+            run_precompile(
+                &mut precompiles,
+                MonadHardfork::MonadNine,
+                STAKING_ADDRESS,
+                Bytes::new(),
+            )
+            .expect("staking override should execute"),
+            27,
+            b"staking",
+        );
+        assert_custom_result(
+            run_precompile(
+                &mut precompiles,
+                MonadHardfork::MonadNine,
+                RESERVE_BALANCE_ADDRESS,
+                Bytes::new(),
+            )
+            .expect("reserve-balance override should execute"),
+            29,
+            b"reserve",
+        );
+
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadEight));
+        assert!(precompiles.inner.get(&custom_address).is_some());
+        assert_eq!(execute_modexp(&precompiles, &[]).gas_used, 23);
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadNine));
+        assert_custom_result(
+            run_precompile(
+                &mut precompiles,
+                MonadHardfork::MonadNine,
+                RESERVE_BALANCE_ADDRESS,
+                Bytes::new(),
+            )
+            .expect("reserve-balance override should survive the round trip"),
+            29,
+            b"reserve",
+        );
+    }
+
+    #[test]
+    fn removed_monad_precompiles_stay_removed_across_transitions() {
+        let mut precompiles = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadNine);
+        precompiles.apply_precompile(&STAKING_ADDRESS, |_| None);
+        precompiles.apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| None);
+
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadNine));
+        assert_precompile_absent(&mut precompiles, MonadHardfork::MonadNine, STAKING_ADDRESS);
+        assert_precompile_absent(
+            &mut precompiles,
+            MonadHardfork::MonadNine,
+            RESERVE_BALANCE_ADDRESS,
+        );
+
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadEight));
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadNine));
+        assert_precompile_absent(&mut precompiles, MonadHardfork::MonadNine, STAKING_ADDRESS);
+        assert_precompile_absent(
+            &mut precompiles,
+            MonadHardfork::MonadNine,
+            RESERVE_BALANCE_ADDRESS,
+        );
+    }
+
+    #[test]
+    fn removing_monad_eight_override_restores_native_reserve_balance() {
+        let mut precompiles = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadEight);
+        precompiles.apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| {
+            Some(custom_precompile("ReserveBalanceOverride", 29, b"reserve"))
+        });
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadEight));
+
+        precompiles.apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| None);
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadEight));
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadNine));
+
+        assert_eq!(
+            precompiles
+                .inner
+                .get(&RESERVE_BALANCE_ADDRESS)
+                .expect("native reserve-balance precompile should be restored")
+                .precompile_id()
+                .name(),
+            MONAD_RESERVE_BALANCE_ID
+        );
+        let result = run_precompile(
+            &mut precompiles,
+            MonadHardfork::MonadNine,
+            RESERVE_BALANCE_ADDRESS,
+            Bytes::copy_from_slice(&monad_revm::reserve_balance::abi::DIPPED_INTO_RESERVE_SELECTOR),
+        )
+        .expect("native reserve-balance precompile should execute");
+        assert_eq!(result.result, InstructionResult::Return);
+        assert_eq!(
+            result.gas.total_gas_spent(),
+            monad_revm::reserve_balance::abi::DIPPED_INTO_RESERVE_GAS
+        );
+        assert_eq!(result.output, Bytes::from([0u8; 32]));
+    }
+
+    #[test]
+    fn same_spec_mutations_refresh_warm_addresses_through_evm_api() {
+        let custom_address = Address::from([0x55; 20]);
+        let mut evm = MonadEvmFactory.create_evm(
+            EmptyDB::default(),
+            EvmEnv::new(
+                CfgEnv::new_with_spec(MonadHardfork::MonadEight),
+                BlockEnv::default(),
+            ),
+        );
+
+        evm.precompiles_mut()
+            .apply_precompile(&custom_address, |_| {
+                Some(custom_precompile("InjectedPrecompile", 17, b"custom"))
             });
+        assert!(set_spec(
+            &mut evm.inner.0.precompiles,
+            MonadHardfork::MonadEight
+        ));
+        assert!(evm
+            .inner
+            .0
+            .precompiles
+            .inner_warm_addresses()
+            .contains(&custom_address));
 
-        assert!(
-            PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
-                &mut precompiles,
-                MonadHardfork::MonadNine
-            )
-        );
-        assert!(precompiles.inner.get(&custom_address).is_some());
-        assert!(precompiles.warm_addresses.contains(&custom_address));
-        assert_eq!(execute_modexp(&precompiles, &[]).gas_used, 23);
+        evm.precompiles_mut()
+            .apply_precompile(&custom_address, |_| None);
+        assert!(set_spec(
+            &mut evm.inner.0.precompiles,
+            MonadHardfork::MonadEight
+        ));
+        assert!(!evm
+            .inner
+            .0
+            .precompiles
+            .inner_warm_addresses()
+            .contains(&custom_address));
+        assert!(!set_spec(
+            &mut evm.inner.0.precompiles,
+            MonadHardfork::MonadEight
+        ));
+        assert!(set_spec(
+            &mut evm.inner.0.precompiles,
+            MonadHardfork::MonadNine
+        ));
+        assert!(evm.inner.0.precompiles.contains(&RESERVE_BALANCE_ADDRESS));
+    }
+
+    #[test]
+    fn extending_precompiles_preserves_custom_monad_entries() {
+        let static_precompiles = MonadPrecompiles::new_with_spec(MonadHardfork::MonadEight);
+        let mut precompiles = PrecompilesMap::from_static(static_precompiles.precompiles());
+        precompiles.apply_precompile(&STAKING_ADDRESS, |_| {
+            Some(custom_precompile("StakingOverride", 27, b"staking"))
+        });
+        precompiles.apply_precompile(&RESERVE_BALANCE_ADDRESS, |_| {
+            Some(custom_precompile("ReserveBalanceOverride", 29, b"reserve"))
+        });
+
+        extend_monad_precompiles_for_spec(&mut precompiles, MonadHardfork::MonadEight);
+        extend_monad_precompiles_for_spec(&mut precompiles, MonadHardfork::MonadNine);
+
         assert_eq!(
             precompiles
-                .inner
+                .get(&STAKING_ADDRESS)
+                .expect("staking override should remain installed")
+                .precompile_id()
+                .name(),
+            "StakingOverride"
+        );
+        assert_eq!(
+            precompiles
                 .get(&RESERVE_BALANCE_ADDRESS)
-                .expect("reserve balance override should be preserved")
+                .expect("reserve-balance override should remain installed")
                 .precompile_id()
                 .name(),
             "ReserveBalanceOverride"
         );
+    }
 
-        assert!(
-            PrecompileProvider::<MonadContext<revm::database::EmptyDB>>::set_spec(
-                &mut precompiles,
-                MonadHardfork::MonadEight
-            )
-        );
-        assert!(precompiles.inner.get(&custom_address).is_some());
-        assert_eq!(execute_modexp(&precompiles, &[]).gas_used, 23);
-        assert_eq!(
-            precompiles
-                .inner
-                .get(&RESERVE_BALANCE_ADDRESS)
-                .expect("reserve balance override should survive the round trip")
-                .precompile_id()
-                .name(),
-            "ReserveBalanceOverride"
-        );
+    #[test]
+    fn moved_staking_precompile_executes_from_the_map() {
+        let moved_address = Address::from([0x66; 20]);
+        let mut precompiles = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadEight);
+        precompiles
+            .move_precompiles([(STAKING_ADDRESS, moved_address)])
+            .expect("native staking precompile should be movable");
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadEight));
+
+        assert_precompile_absent(&mut precompiles, MonadHardfork::MonadEight, STAKING_ADDRESS);
+        let result = run_precompile(
+            &mut precompiles,
+            MonadHardfork::MonadEight,
+            moved_address,
+            Bytes::new(),
+        )
+        .expect("moved staking precompile should execute dynamically");
+        assert_eq!(result.result, InstructionResult::Revert);
+        assert_eq!(result.output, Bytes::from_static(b"method not supported"));
     }
 }
