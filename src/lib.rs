@@ -1,4 +1,5 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 //! Alloy EVM implementation for Monad blockchain.
 //!
@@ -8,11 +9,25 @@
 //! - [`MonadContext`]: Type alias for Monad EVM context (re-exported from monad-revm)
 //! - [`extend_monad_precompiles_for_spec`]: Function to extend `PrecompilesMap` with Monad precompiles
 
+extern crate alloc;
+#[cfg(test)]
+extern crate std;
+
+use alloc::{
+    format,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 use alloy_evm::{
     precompiles::{DynPrecompile, Precompile, PrecompileInput, PrecompilesMap},
     Database, Evm, EvmEnv, EvmFactory, EvmInternals,
 };
 use alloy_primitives::{Address, Bytes, U256};
+use core::{
+    ops::{Deref, DerefMut},
+    sync::atomic::{AtomicU8, Ordering},
+};
 use monad_revm::{
     instructions::MonadInstructions,
     monad_context_with_db,
@@ -29,15 +44,8 @@ use revm::{
     inspector::{InspectSystemCallEvm, NoOpInspector},
     interpreter::{CallInputs, InstructionResult, InterpreterResult},
     precompile::{PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput},
-    primitives::AddressSet,
+    primitives::{AddressSet, OnceLock},
     Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
-};
-use std::{
-    ops::{Deref, DerefMut},
-    sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc, OnceLock,
-    },
 };
 
 // Re-export monad-revm types for external users
@@ -710,6 +718,7 @@ impl StakingStorage for PrecompileInputStakingStorage<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use monad_revm::{api::block::syscall_snapshot_calldata, staking::constants::SYSTEM_ADDRESS};
     use revm::{
         bytecode::opcode,
