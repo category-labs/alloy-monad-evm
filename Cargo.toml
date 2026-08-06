@@ -35,13 +35,10 @@ redundant-clone = "warn"
 alloy-evm = { version = "0.37.0", default-features = false }
 alloy-primitives = { version = "1.6.0", default-features = false }
 revm = { version = "41.0.0", default-features = false }
-monad-revm = { version = "0.3.0", default-features = false }
+monad-revm = { version = "0.5.0", default-features = false }
 
 [dev-dependencies]
 test-case = "3"
-
-[patch.crates-io]
-monad-revm = { git = "https://github.com/category-labs/monad-revm.git", rev = "704889928d3e0d8b75111a81676ff2b9fcf33df6" }
 
 [features]
 default = ["std", "memory_limit"]
