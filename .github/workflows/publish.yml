@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        run: rustup toolchain install 1.91 --profile minimal --component clippy --component rustfmt
+        run: rustup toolchain install 1.94.1 --profile minimal --component clippy --component rustfmt
 
       - name: Install bare-metal target
         run: rustup target add thumbv7em-none-eabi
