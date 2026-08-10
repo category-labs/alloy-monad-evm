@@ -805,6 +805,58 @@ mod tests {
     }
 
     #[test]
+    fn regular_transaction_inspection_matches_uninspected_execution() {
+        let caller = Address::from([0x11; 20]);
+        let contract = Address::from([0x22; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::MAX,
+                ..Default::default()
+            },
+        );
+        db.insert_account_info(
+            contract,
+            AccountInfo::default().with_code(Bytecode::new_raw(Bytes::from(vec![
+                opcode::PUSH1,
+                0x01,
+                opcode::PUSH1,
+                0x00,
+                opcode::SSTORE,
+                opcode::STOP,
+            ]))),
+        );
+        let env = EvmEnv::new(
+            CfgEnv::new_with_spec(MonadHardfork::MonadNine),
+            BlockEnv::default(),
+        );
+        let tx = TxEnv::builder()
+            .caller(caller)
+            .to(contract)
+            .gas_limit(100_000)
+            .gas_price(0)
+            .build_fill();
+
+        let mut uninspected = MonadEvmFactory.create_evm(db.clone(), env.clone());
+        let expected = uninspected
+            .transact(tx.clone())
+            .expect("uninspected transaction should succeed");
+
+        let mut inspected =
+            MonadEvmFactory.create_evm_with_inspector(db, env, CountInspector::default());
+        let actual = inspected
+            .transact(tx)
+            .expect("inspected transaction should succeed");
+
+        assert_eq!(actual, expected);
+        assert!(actual.result.is_success());
+        assert!(!actual.state.is_empty());
+        assert!(inspected.components().1.call_count() > 0);
+        assert!(inspected.components().1.step_count() > 0);
+    }
+
+    #[test]
     fn system_call_inspection_matches_uninspected_execution() {
         let caller = Address::from([0x11; 20]);
         let contract = Address::from([0x22; 20]);
