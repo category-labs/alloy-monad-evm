@@ -13,6 +13,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   check:
     name: cargo check
@@ -20,10 +23,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.1
       - uses: Swatinem/rust-cache@v2
-      - name: Check default features
-        run: cargo check --locked --all-targets
+      - name: Check all features
+        run: cargo check --locked --all-targets --all-features
       - name: Check no_std library
         run: cargo check --locked --no-default-features --lib
 
@@ -40,7 +43,7 @@ jobs:
             args: '--features memory_limit'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91
+      - uses: dtolnay/rust-toolchain@1.94.1
       - name: Install bare-metal target
         run: rustup target add thumbv7em-none-eabi
       - uses: Swatinem/rust-cache@v2
@@ -54,9 +57,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.1
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked --all-targets
+      - run: cargo build --locked --all-targets --all-features
 
   test:
     name: cargo test
@@ -64,7 +67,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.1
       - uses: Swatinem/rust-cache@v2
       - name: Test default features
         run: cargo test --locked
@@ -79,7 +82,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -93,7 +96,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.1
         with:
           components: rustfmt
       - run: cargo fmt --all --check
