@@ -2,6 +2,37 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.0] - 2026-08-14
+
+### Compatibility
+
+| Dependency | 0.5.0 | 0.6.0 |
+|------------|-------|-------|
+| `alloy-evm` | 0.37.0 | 0.38.0 |
+| `alloy-primitives` | 1.6.0 | 1.6.1 |
+| `revm` | 41.0.0 | 42.0.1 |
+| `monad-revm` | 0.5.1 | 0.6.0 |
+
+The Rust MSRV is raised from 1.91 to 1.94.1.
+
+### Changed
+
+- Migrated the EVM factory, execution, inspection, and precompile integration to the Alloy 0.38,
+  REVM 42, and `monad-revm` 0.6 interfaces.
+- Hardened CI and release workflows with pinned actions, least-privilege permissions, dependency
+  update checks, workflow security scanning, and crates.io trusted publishing.
+
+### Validation
+
+- Added regression coverage confirming that inspected regular transactions produce the same
+  execution result and state changes as uninspected transactions while invoking the inspector.
+
+### Breaking changes and migration
+
+- Downstream code must use the Alloy 0.38, REVM 42, and `monad-revm` 0.6 trait surfaces and
+  compatible transaction, environment, inspector, and precompile types.
+- Building this release requires Rust 1.94.1 or newer.
+
 ## [0.5.0] - 2026-08-06
 
 ### Compatibility
@@ -55,4 +86,5 @@ The Rust MSRV remains 1.91.
 - The native reserve-balance entry cannot be moved to another address because its execution needs
   the Monad journal context. Replace it with a custom precompile before moving it.
 
+[0.6.0]: https://github.com/category-labs/alloy-monad-evm/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/category-labs/alloy-monad-evm/compare/v0.4.0...v0.5.0
