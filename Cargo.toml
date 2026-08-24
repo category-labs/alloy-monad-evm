@@ -37,6 +37,9 @@ alloy-primitives = { version = "1.6.1", default-features = false }
 revm = { version = "42.0.1", default-features = false }
 monad-revm = { version = "0.6.0", default-features = false }
 
+[patch.crates-io]
+monad-revm = { git = "https://github.com/category-labs/monad-revm", rev = "f512e36cdd9abffc63c519f2c6b2d0a47d0898e1" }
+
 [features]
 default = ["std", "memory_limit"]
 std = [

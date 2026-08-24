@@ -1785,8 +1785,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "monad-revm"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b640502c0bcc1ac08d9eb2555467ba47fb9071715b0c53592d64f8a5fade2a41"
+source = "git+https://github.com/category-labs/monad-revm?rev=f512e36cdd9abffc63c519f2c6b2d0a47d0898e1#f512e36cdd9abffc63c519f2c6b2d0a47d0898e1"
 dependencies = [
  "alloy-sol-types",
  "auto_impl",
