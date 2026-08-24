@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Added `MonadTen` support across Alloy EVM construction, runtime precompile selection, and
+  hardfork transitions.
+- Added factory-level execution coverage for MIP-8 page-level storage warming.
+
 ## [0.6.0] - 2026-08-14
 
 ### Compatibility
@@ -86,5 +94,6 @@ The Rust MSRV remains 1.91.
 - The native reserve-balance entry cannot be moved to another address because its execution needs
   the Monad journal context. Replace it with a custom precompile before moving it.
 
+[Unreleased]: https://github.com/category-labs/alloy-monad-evm/compare/v0.6.0...HEAD
 [0.6.0]: https://github.com/category-labs/alloy-monad-evm/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/category-labs/alloy-monad-evm/compare/v0.4.0...v0.5.0

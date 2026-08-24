@@ -43,6 +43,7 @@ This keeps staking behavior centralized in one place (`monad-revm`) while allowi
 ## Monad-specific behavior exposed through this crate
 
 - Monad gas model (cold access repricing, no refunds).
+- MIP-8 page-level storage warming and SSTORE accounting on MonadTen and later.
 - Monad precompile repricing.
 - Staking precompile at `0x1000` (read + write + syscalls, via `monad-revm`).
 - Reserve-balance precompile execution and metadata at `0x1001` for MonadNine and later.

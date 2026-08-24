@@ -68,11 +68,13 @@ fn is_native_monad_id(id: &PrecompileId, expected: &str) -> bool {
 fn static_monad_precompiles(spec: MonadHardfork) -> &'static revm::precompile::Precompiles {
     static MONAD_EIGHT: OnceLock<&'static revm::precompile::Precompiles> = OnceLock::new();
     static MONAD_NINE: OnceLock<&'static revm::precompile::Precompiles> = OnceLock::new();
+    static MONAD_TEN: OnceLock<&'static revm::precompile::Precompiles> = OnceLock::new();
     static MONAD_NEXT: OnceLock<&'static revm::precompile::Precompiles> = OnceLock::new();
 
     let precompiles = match spec {
         MonadHardfork::MonadEight => &MONAD_EIGHT,
         MonadHardfork::MonadNine => &MONAD_NINE,
+        MonadHardfork::MonadTen => &MONAD_TEN,
         MonadHardfork::MonadNext => &MONAD_NEXT,
     };
     precompiles.get_or_init(|| MonadPrecompiles::new_with_spec(spec).precompiles())
@@ -81,6 +83,7 @@ fn static_monad_precompiles(spec: MonadHardfork) -> &'static revm::precompile::P
 fn runtime_monad_precompiles(runtime_spec: Arc<AtomicU8>) -> PrecompilesMap {
     let monad_eight = static_monad_precompiles(MonadHardfork::MonadEight);
     let monad_nine = static_monad_precompiles(MonadHardfork::MonadNine);
+    let monad_ten = static_monad_precompiles(MonadHardfork::MonadTen);
     let monad_next = static_monad_precompiles(MonadHardfork::MonadNext);
 
     let same_addresses = |other: &'static revm::precompile::Precompiles| {
@@ -92,7 +95,7 @@ fn runtime_monad_precompiles(runtime_spec: Arc<AtomicU8>) -> PrecompilesMap {
                 .all(|address| monad_eight.contains(address))
     };
     assert!(
-        same_addresses(monad_nine) && same_addresses(monad_next),
+        same_addresses(monad_nine) && same_addresses(monad_ten) && same_addresses(monad_next),
         "runtime Monad precompile selection requires stable protocol addresses"
     );
 
@@ -104,11 +107,16 @@ fn runtime_monad_precompiles(runtime_spec: Arc<AtomicU8>) -> PrecompilesMap {
         let monad_nine = monad_nine
             .get(&address)
             .expect("MonadNine precompile address should be present");
+        let monad_ten = monad_ten
+            .get(&address)
+            .expect("MonadTen precompile address should be present");
         let monad_next = monad_next
             .get(&address)
             .expect("MonadNext precompile address should be present");
         assert!(
-            monad_eight.id() == monad_nine.id() && monad_eight.id() == monad_next.id(),
+            monad_eight.id() == monad_nine.id()
+                && monad_eight.id() == monad_ten.id()
+                && monad_eight.id() == monad_next.id(),
             "runtime Monad precompile selection requires stable protocol identifiers"
         );
         let id = monad_eight.id().clone();
@@ -118,6 +126,7 @@ fn runtime_monad_precompiles(runtime_spec: Arc<AtomicU8>) -> PrecompilesMap {
                 let precompile = match runtime_spec.load(Ordering::Relaxed) {
                     spec if spec == MonadHardfork::MonadEight as u8 => monad_eight,
                     spec if spec == MonadHardfork::MonadNine as u8 => monad_nine,
+                    spec if spec == MonadHardfork::MonadTen as u8 => monad_ten,
                     spec if spec == MonadHardfork::MonadNext as u8 => monad_next,
                     spec => unreachable!("invalid runtime Monad hardfork discriminant: {spec}"),
                 };
@@ -719,7 +728,12 @@ impl StakingStorage for PrecompileInputStakingStorage<'_> {
 mod tests {
     use super::*;
     use alloc::vec;
-    use monad_revm::{api::block::syscall_snapshot_calldata, staking::constants::SYSTEM_ADDRESS};
+    use monad_revm::{
+        api::block::syscall_snapshot_calldata,
+        instructions::{COLD_SLOAD_COST, WARM_STORAGE_READ_COST},
+        page::PAGE_WRITE_COST,
+        staking::constants::SYSTEM_ADDRESS,
+    };
     use revm::{
         bytecode::opcode,
         database::{EmptyDB, InMemoryDB},
@@ -856,6 +870,103 @@ mod tests {
         assert!(inspected.components().1.step_count() > 0);
     }
 
+    fn storage_gas(spec: MonadHardfork, code: Vec<u8>) -> u64 {
+        let caller = Address::from([0x11; 20]);
+        let contract = Address::from([0x22; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::MAX,
+                ..Default::default()
+            },
+        );
+        db.insert_account_info(
+            contract,
+            AccountInfo::default().with_code(Bytecode::new_raw(Bytes::from(code))),
+        );
+
+        let mut evm = MonadEvmFactory.create_evm(
+            db,
+            EvmEnv::new(CfgEnv::new_with_spec(spec), BlockEnv::default()),
+        );
+        let tx = TxEnv::builder()
+            .caller(caller)
+            .to(contract)
+            .gas_limit(100_000)
+            .gas_price(0)
+            .build_fill();
+
+        evm.transact(tx)
+            .expect("storage transaction should execute")
+            .result
+            .tx_gas_used()
+    }
+
+    fn storage_read_gas(spec: MonadHardfork, second_slot: u8) -> u64 {
+        storage_gas(
+            spec,
+            vec![
+                opcode::PUSH1,
+                0,
+                opcode::SLOAD,
+                opcode::POP,
+                opcode::PUSH1,
+                second_slot,
+                opcode::SLOAD,
+                opcode::POP,
+                opcode::STOP,
+            ],
+        )
+    }
+
+    fn storage_write_gas(spec: MonadHardfork, second_slot: u8) -> u64 {
+        storage_gas(
+            spec,
+            vec![
+                opcode::PUSH1,
+                1,
+                opcode::PUSH1,
+                0,
+                opcode::SSTORE,
+                opcode::PUSH1,
+                1,
+                opcode::PUSH1,
+                second_slot,
+                opcode::SSTORE,
+                opcode::STOP,
+            ],
+        )
+    }
+
+    #[test]
+    fn monad_factory_applies_mip8_page_warmth() {
+        let monad_nine_same_page = storage_read_gas(MonadHardfork::MonadNine, 127);
+        let monad_nine_next_page = storage_read_gas(MonadHardfork::MonadNine, 128);
+        assert_eq!(monad_nine_next_page, monad_nine_same_page);
+
+        let monad_ten_same_page = storage_read_gas(MonadHardfork::MonadTen, 127);
+        let monad_ten_next_page = storage_read_gas(MonadHardfork::MonadTen, 128);
+        assert_eq!(
+            monad_ten_next_page - monad_ten_same_page,
+            COLD_SLOAD_COST - WARM_STORAGE_READ_COST
+        );
+    }
+
+    #[test]
+    fn monad_factory_applies_mip8_sstore_schedule() {
+        let monad_nine_same_page = storage_write_gas(MonadHardfork::MonadNine, 1);
+        let monad_nine_next_page = storage_write_gas(MonadHardfork::MonadNine, 128);
+        assert_eq!(monad_nine_next_page, monad_nine_same_page);
+
+        let monad_ten_same_page = storage_write_gas(MonadHardfork::MonadTen, 1);
+        let monad_ten_next_page = storage_write_gas(MonadHardfork::MonadTen, 128);
+        assert_eq!(
+            monad_ten_next_page - monad_ten_same_page,
+            COLD_SLOAD_COST - WARM_STORAGE_READ_COST + PAGE_WRITE_COST
+        );
+    }
+
     #[test]
     fn system_call_inspection_matches_uninspected_execution() {
         let caller = Address::from([0x11; 20]);
@@ -933,6 +1044,7 @@ mod tests {
         for spec in [
             MonadHardfork::MonadEight,
             MonadHardfork::MonadNine,
+            MonadHardfork::MonadTen,
             MonadHardfork::MonadNext,
         ] {
             assert!(factory_exposes_precompile(spec, STAKING_ADDRESS));
@@ -950,6 +1062,10 @@ mod tests {
             RESERVE_BALANCE_ADDRESS
         ));
         assert!(factory_exposes_precompile(
+            MonadHardfork::MonadTen,
+            RESERVE_BALANCE_ADDRESS
+        ));
+        assert!(factory_exposes_precompile(
             MonadHardfork::MonadNext,
             RESERVE_BALANCE_ADDRESS
         ));
@@ -960,6 +1076,7 @@ mod tests {
         for spec in [
             MonadHardfork::MonadEight,
             MonadHardfork::MonadNine,
+            MonadHardfork::MonadTen,
             MonadHardfork::MonadNext,
         ] {
             let precompiles = MonadPrecompilesMap::new_with_spec(spec);
@@ -974,6 +1091,7 @@ mod tests {
     fn reserve_balance_precompile_is_gated_to_monad_nine_and_later() {
         let monad_eight = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadEight);
         let monad_nine = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadNine);
+        let monad_ten = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadTen);
         let monad_next = MonadPrecompilesMap::new_with_spec(MonadHardfork::MonadNext);
 
         assert!(!monad_eight.contains(&RESERVE_BALANCE_ADDRESS));
@@ -983,6 +1101,11 @@ mod tests {
 
         assert!(monad_nine.contains(&RESERVE_BALANCE_ADDRESS));
         assert!(monad_nine
+            .addresses()
+            .any(|address| address == RESERVE_BALANCE_ADDRESS));
+
+        assert!(monad_ten.contains(&RESERVE_BALANCE_ADDRESS));
+        assert!(monad_ten
             .addresses()
             .any(|address| address == RESERVE_BALANCE_ADDRESS));
 
@@ -1105,6 +1228,17 @@ mod tests {
         assert!(
             monad_nine_gas > monad_eight_gas,
             "MonadNine MODEXP gas should exceed MonadEight"
+        );
+
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadTen));
+        assert_eq!(
+            execute_modexp(&precompiles, &input).gas_used,
+            monad_nine_gas
+        );
+        assert!(set_spec(&mut precompiles, MonadHardfork::MonadNine));
+        assert_eq!(
+            execute_modexp(&precompiles, &input).gas_used,
+            monad_nine_gas
         );
 
         assert!(set_spec(&mut precompiles, MonadHardfork::MonadEight));
