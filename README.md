@@ -18,7 +18,7 @@ For the staking precompile design and detailed semantics, see the `monad-revm` R
 |-----------|---------|
 | `alloy-evm` | `0.38.0` |
 | `alloy-primitives` | `1.6.1` |
-| `monad-revm` | `0.6.0` |
+| `monad-revm` | `0.7.0` |
 | `revm` | `42.0.1` |
 | Rust MSRV | `1.94.1` |
 
@@ -54,8 +54,8 @@ This keeps staking behavior centralized in one place (`monad-revm`) while allowi
 
 ```toml
 [dependencies]
-alloy-monad-evm = "0.6.0"
-monad-revm = "0.6.0"
+alloy-monad-evm = "0.7.0"
+monad-revm = "0.7.0"
 ```
 
 ## Usage
