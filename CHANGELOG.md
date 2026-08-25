@@ -2,13 +2,33 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.7.0] - 2026-08-25
+
+### Compatibility
+
+| Dependency | 0.6.0 | 0.7.0 |
+|------------|-------|-------|
+| `alloy-evm` | 0.38.0 | 0.38.0 |
+| `alloy-primitives` | 1.6.1 | 1.6.1 |
+| `revm` | 42.0.1 | 42.0.1 |
+| `monad-revm` | 0.6.0 | 0.7.0 |
+
+The Rust MSRV remains 1.94.1.
 
 ### Added
 
 - Added `MonadTen` support across Alloy EVM construction, runtime precompile selection, and
   hardfork transitions.
 - Added factory-level execution coverage for MIP-8 page-level storage warming.
+
+### Changed
+
+- Updated to the published `monad-revm` 0.7.0 release and removed the temporary Git override.
+
+### Migration
+
+- Applications that depend directly on both crates should update `alloy-monad-evm` and
+  `monad-revm` to 0.7.0 together.
 
 ## [0.6.0] - 2026-08-14
 
@@ -94,6 +114,6 @@ The Rust MSRV remains 1.91.
 - The native reserve-balance entry cannot be moved to another address because its execution needs
   the Monad journal context. Replace it with a custom precompile before moving it.
 
-[Unreleased]: https://github.com/category-labs/alloy-monad-evm/compare/v0.6.0...HEAD
+[0.7.0]: https://github.com/category-labs/alloy-monad-evm/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/category-labs/alloy-monad-evm/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/category-labs/alloy-monad-evm/compare/v0.4.0...v0.5.0
