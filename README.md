@@ -16,10 +16,10 @@ For the staking precompile design and detailed semantics, see the `monad-revm` R
 
 | Component | Version |
 |-----------|---------|
-| `alloy-evm` | `0.38.0` |
+| `alloy-evm` | `0.39.0` |
 | `alloy-primitives` | `1.6.1` |
-| `monad-revm` | `0.7.0` |
-| `revm` | `42.0.1` |
+| `monad-revm` | `0.8.0` |
+| `revm` | `43.0.0` |
 | Rust MSRV | `1.94.1` |
 
 ## What this crate adds on top of `monad-revm`
@@ -54,9 +54,13 @@ This keeps staking behavior centralized in one place (`monad-revm`) while allowi
 
 ```toml
 [dependencies]
-alloy-monad-evm = "0.7.0"
-monad-revm = "0.7.0"
+alloy-monad-evm = "0.8.0"
+monad-revm = "0.8.0"
 ```
+
+Applications that also depend directly on `alloy-evm` or `revm` must use version 0.39 and
+43, respectively. Update these dependencies together because their public EVM, database,
+inspector, and precompile types must match.
 
 ## Usage
 
