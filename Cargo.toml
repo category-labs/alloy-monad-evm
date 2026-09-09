@@ -1,7 +1,7 @@
 [package]
 name = "alloy-monad-evm"
 description = "Monad EVM implementation"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.94.1"
 authors = ["Haythem Sellami - Category Labs <hsellami@category.xyz>"]
@@ -32,10 +32,10 @@ option-if-let-else = "allow"
 redundant-clone = "warn"
 
 [dependencies]
-alloy-evm = { version = "0.38.0", default-features = false }
+alloy-evm = { version = "0.39.0", default-features = false }
 alloy-primitives = { version = "1.6.1", default-features = false }
-revm = { version = "42.0.1", default-features = false }
-monad-revm = { version = "0.7.0", default-features = false }
+revm = { version = "43.0.0", default-features = false }
+monad-revm = { version = "0.8.0", default-features = false }
 
 [features]
 default = ["std", "memory_limit"]
