@@ -21,7 +21,7 @@ use alloc::{
 };
 use alloy_evm::{
     precompiles::{DynPrecompile, Precompile, PrecompileInput, PrecompilesMap},
-    Database, Evm, EvmEnv, EvmFactory, EvmInternals,
+    Database, Evm, EvmEnv, EvmFactory, EvmInternals, EvmInternalsError,
 };
 use alloy_primitives::{Address, Bytes, U256};
 use core::{
@@ -592,9 +592,7 @@ fn extend_monad_staking_precompile(precompiles: &mut PrecompilesMap) {
                     Some(s) => s,
                     None => {
                         // Route short input through write path for proper fallback handling
-                        let mut storage = PrecompileInputStakingStorage {
-                            internals: input.internals,
-                        };
+                        let mut storage = PrecompileInputStakingStorage::new(input.internals);
                         let result = staking::write::run_staking_write(
                             input.data,
                             input.gas,
@@ -609,9 +607,7 @@ fn extend_monad_staking_precompile(precompiles: &mut PrecompilesMap) {
 
                 // Route write selectors through the write module (payability checked per-method inside)
                 if staking::write::is_write_selector(selector) {
-                    let mut storage = PrecompileInputStakingStorage {
-                        internals: input.internals,
-                    };
+                    let mut storage = PrecompileInputStakingStorage::new(input.internals);
                     let caller = input.caller;
                     let call_value = input.value;
                     match staking::write::run_staking_write(
@@ -626,9 +622,7 @@ fn extend_monad_staking_precompile(precompiles: &mut PrecompilesMap) {
                     }
                 } else {
                     // Read operations (payability checked per-method inside)
-                    let mut reader = PrecompileInputStakingStorage {
-                        internals: input.internals,
-                    };
+                    let mut reader = PrecompileInputStakingStorage::new(input.internals);
                     match staking::run_staking_with_reader(
                         input.data,
                         input.gas,
@@ -687,7 +681,24 @@ fn interpreter_result_to_output(
 
 /// Storage implementation that uses `PrecompileInput.internals` for both reads and writes.
 struct PrecompileInputStakingStorage<'a> {
-    internals: alloy_evm::EvmInternals<'a>,
+    internals: EvmInternals<'a>,
+    fatal_error: Option<EvmInternalsError>,
+}
+
+impl<'a> PrecompileInputStakingStorage<'a> {
+    const fn new(internals: EvmInternals<'a>) -> Self {
+        Self {
+            internals,
+            fatal_error: None,
+        }
+    }
+
+    fn record_database_error(&mut self, error: EvmInternalsError) -> PrecompileHalt {
+        if self.fatal_error.is_none() {
+            self.fatal_error = Some(error);
+        }
+        PrecompileHalt::other_static("staking database access failed")
+    }
 }
 
 impl StorageReader for PrecompileInputStakingStorage<'_> {
@@ -695,7 +706,11 @@ impl StorageReader for PrecompileInputStakingStorage<'_> {
         self.internals
             .sload(STAKING_ADDRESS, key)
             .map(|r| r.data)
-            .map_err(|e| PrecompileHalt::other(format!("Storage read failed: {e:?}")))
+            .map_err(|error| self.record_database_error(error))
+    }
+
+    fn take_fatal_error(&mut self) -> Option<String> {
+        self.fatal_error.take().map(|error| error.to_string())
     }
 }
 
@@ -704,7 +719,7 @@ impl StakingStorage for PrecompileInputStakingStorage<'_> {
         self.internals
             .sstore(STAKING_ADDRESS, key, value)
             .map(|_| ())
-            .map_err(|e| PrecompileHalt::other(format!("Storage write failed: {e:?}")))
+            .map_err(|error| self.record_database_error(error))
     }
 
     fn transfer(&mut self, from: Address, to: Address, amount: U256) -> Result<(), PrecompileHalt> {
@@ -714,7 +729,7 @@ impl StakingStorage for PrecompileInputStakingStorage<'_> {
         match self.internals.transfer(from, to, amount) {
             Ok(None) => Ok(()),
             Ok(Some(e)) => Err(PrecompileHalt::other(format!("Transfer failed: {e:?}"))),
-            Err(e) => Err(PrecompileHalt::other(format!("Transfer error: {e:?}"))),
+            Err(error) => Err(self.record_database_error(error)),
         }
     }
 

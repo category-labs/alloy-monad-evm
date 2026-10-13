@@ -9,6 +9,9 @@ All notable changes to this project are documented in this file.
 - EIP-7702 delegation to Ethereum precompiles now returns empty output without charging precompile
   gas, including dynamic precompile overrides. Temporarily pinned `monad-revm` to the immutable
   fix commit pending its next release.
+- Propagated staking storage and transfer database failures as fatal execution errors through
+  the dynamic precompile adapter, preventing catchable reverts and transaction commits on
+  unavailable state. Requires the matching fatal-error adapter support in `monad-revm`.
 
 ### Changed
 
