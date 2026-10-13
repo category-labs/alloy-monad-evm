@@ -10,6 +10,13 @@ All notable changes to this project are documented in this file.
   gas, including dynamic precompile overrides. Temporarily pinned `monad-revm` to the immutable
   fix commit pending its next release.
 
+### Changed
+
+- Propagate `MonadHaltReason` through `Evm` and `EvmFactory`, retaining the distinct reserve-balance
+  rejection outcome from `monad-revm`. Downstream result types and halt-reason matches must use
+  the re-exported Monad type, with ordinary Ethereum halts wrapped in its `Ethereum` variant.
+  This requires the corresponding `monad-revm` reserve-enforcement update.
+
 ## [0.8.0] - 2026-09-09
 
 ### Compatibility
