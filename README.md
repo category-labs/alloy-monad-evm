@@ -53,6 +53,9 @@ This keeps staking behavior centralized in one place (`monad-revm`) while allowi
 - Monad precompile repricing.
 - Staking precompile at `0x1000` (read + write + syscalls, via `monad-revm`).
 - Reserve-balance precompile execution and metadata at `0x1001` for MonadNine and later.
+- Transaction reserve enforcement on every supported hardfork, exposed as
+  `MonadHaltReason::ReserveBalanceViolation`. Both `Evm` and `EvmFactory` use the re-exported
+  `MonadHaltReason`; ordinary Ethereum halts are wrapped in `MonadHaltReason::Ethereum`.
 - Per-frame protocol precompile selection when execution crosses Monad hardforks.
 - Mutable precompile overrides and removals that remain authoritative for dispatch and warming.
 

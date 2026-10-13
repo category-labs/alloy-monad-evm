@@ -38,7 +38,7 @@ use monad_revm::{
 };
 use revm::{
     context::{BlockEnv, CfgEnv, DBErrorMarker, TxEnv},
-    context_interface::result::{EVMError, HaltReason, ResultAndState},
+    context_interface::result::{EVMError, ResultAndState},
     context_interface::{ContextTr, JournalTr, LocalContextTr},
     handler::{precompile_output_to_interpreter_result, PrecompileProvider},
     inspector::{InspectSystemCallEvm, NoOpInspector},
@@ -49,7 +49,7 @@ use revm::{
 };
 
 // Re-export monad-revm types for external users
-pub use monad_revm::{handler::MonadHandler, MonadContext};
+pub use monad_revm::{handler::MonadHandler, MonadContext, MonadHaltReason};
 
 const MONAD_STAKING_ID: &str = "MonadStaking";
 const MONAD_RESERVE_BALANCE_ID: &str = "MonadReserveBalance";
@@ -397,7 +397,7 @@ where
     type DB = DB;
     type Tx = TxEnv;
     type Error = EVMError<DB::Error>;
-    type HaltReason = HaltReason;
+    type HaltReason = MonadHaltReason;
     type Spec = MonadHardfork;
     type BlockEnv = BlockEnv;
     type Precompiles = PrecompilesMap;
@@ -489,7 +489,7 @@ impl EvmFactory for MonadEvmFactory {
     type Context<DB: Database> = MonadContext<DB>;
     type Tx = TxEnv;
     type Error<DBError: DBErrorMarker> = EVMError<DBError>;
-    type HaltReason = HaltReason;
+    type HaltReason = MonadHaltReason;
     type Spec = MonadHardfork;
     type BlockEnv = BlockEnv;
     type Precompiles = PrecompilesMap;
