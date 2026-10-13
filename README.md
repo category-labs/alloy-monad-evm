@@ -22,6 +22,12 @@ For the staking precompile design and detailed semantics, see the `monad-revm` R
 | `revm` | `43.0.0` |
 | Rust MSRV | `1.94.1` |
 
+Development builds temporarily pin `monad-revm` to
+[`31345e4`](https://github.com/category-labs/monad-revm/commit/31345e451d6d2af9e8c2789bd42f1b77dd0f0c2d)
+for the [delegated-precompile fix](https://github.com/category-labs/monad-revm/pull/66).
+Applications consuming this branch and depending directly on `monad-revm` must use the same Git
+revision until the fix is released.
+
 ## What this crate adds on top of `monad-revm`
 
 1. `MonadEvm`: `alloy_evm::Evm` implementation wrapping `monad_revm::MonadEvm`.
