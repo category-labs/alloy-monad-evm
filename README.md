@@ -59,6 +59,30 @@ This keeps staking behavior centralized in one place (`monad-revm`) while allowi
 - Per-frame protocol precompile selection when execution crosses Monad hardforks.
 - Mutable precompile overrides and removals that remain authoritative for dispatch and warming.
 
+### Reserve enforcement and traces
+
+Reserve violations roll back execution state and logs while retaining transaction fees and
+the sender nonce. The root inspector completion callbacks observe the adjudicated outcome,
+including immediate empty-account and precompile calls. Stock `revm-inspectors` Geth and
+Parity traces therefore report a failed root with their ordinary `execution reverted` and
+`Reverted` labels. The distinct reason is available in the returned
+`ExecutionResult::Halt { reason: MonadHaltReason::ReserveBalanceViolation, .. }`; the stock
+trace formats do not add a Monad-specific error message.
+
+With `with_log` enabled, the stock Geth call tracer retains attempted root logs even after a
+revert, just as it does for an ordinary EVM `REVERT`. Those trace logs are not committed
+transaction logs. Successful child frames can also remain visible beneath a rejected root.
+
+Embedders that execute an internal call in an isolated EVM can preserve the enclosing
+reserve tracker with `MonadJournalTr::set_preserve_reserve_balance_tracker(true)`. Such
+execution defers reserve adjudication until the enclosing transaction finishes. Return the
+journal and tracker to the enclosing execution, retain its rollback checkpoint, and restore
+preservation to `false` before normal execution resumes. A later repayment can clear the
+deficit; an unpaid deficit rejects the enclosing transaction and rolls back the isolated
+state too. Reverted isolated calls recompute the restored balances without finalizing the
+enclosing reserve status. These integration tests exercise the Alloy factory and core
+execution APIs; adopting this behavior in Foundry requires a separate downstream update.
+
 ## Installation
 
 ```toml
@@ -70,6 +94,11 @@ monad-revm = "0.8.0"
 Applications that also depend directly on `alloy-evm` or `revm` must use version 0.39 and
 43, respectively. Update these dependencies together because their public EVM, database,
 inspector, and precompile types must match.
+
+This development revision pins `monad-revm` to Git commit
+`048eed44313dc3a7ce24e5fee7430f36bd124423` for reserve enforcement and inspector completion
+handling. Applications building this revision that import core types directly must use the
+same Git source and revision until a compatible release is published.
 
 ## Usage
 
