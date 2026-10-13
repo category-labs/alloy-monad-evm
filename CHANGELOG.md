@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- EIP-7702 delegation to Ethereum precompiles now returns empty output without charging precompile
+  gas, including dynamic precompile overrides. Temporarily pinned `monad-revm` to the immutable
+  fix commit pending its next release.
+
 ## [0.8.0] - 2026-09-09
 
 ### Compatibility
