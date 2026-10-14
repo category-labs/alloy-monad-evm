@@ -23,10 +23,11 @@ For the staking precompile design and detailed semantics, see the `monad-revm` R
 | Rust MSRV | `1.94.1` |
 
 Development builds temporarily pin `monad-revm` to
-[`31345e4`](https://github.com/category-labs/monad-revm/commit/31345e451d6d2af9e8c2789bd42f1b77dd0f0c2d)
-for the [delegated-precompile fix](https://github.com/category-labs/monad-revm/pull/66).
+[`bc7f7af`](https://github.com/category-labs/monad-revm/commit/bc7f7afc8a5e408782c6d67d4224f3ea6966a7a3),
+which contains the merged core fixes for delegated precompiles, fatal staking database errors,
+and reserve enforcement.
 Applications consuming this branch and depending directly on `monad-revm` must use the same Git
-revision until the fix is released.
+revision until these fixes are released.
 
 ## What this crate adds on top of `monad-revm`
 
@@ -94,11 +95,6 @@ monad-revm = "0.8.0"
 Applications that also depend directly on `alloy-evm` or `revm` must use version 0.39 and
 43, respectively. Update these dependencies together because their public EVM, database,
 inspector, and precompile types must match.
-
-This development revision pins `monad-revm` to Git commit
-`048eed44313dc3a7ce24e5fee7430f36bd124423` for reserve enforcement and inspector completion
-handling. Applications building this revision that import core types directly must use the
-same Git source and revision until a compatible release is published.
 
 ## Usage
 

@@ -15,7 +15,8 @@ All notable changes to this project are documented in this file.
 - Propagate `MonadHaltReason` through `Evm` and `EvmFactory`, retaining the distinct reserve-balance
   rejection outcome from `monad-revm`. Downstream result types and halt-reason matches must use
   the re-exported Monad type, with ordinary Ethereum halts wrapped in its `Ethereum` variant.
-  Pin the corresponding `monad-revm` reserve-enforcement and inspector completion update.
+  Pin merged `monad-revm` commit `bc7f7afc8a5e408782c6d67d4224f3ea6966a7a3`, including
+  reserve enforcement, inspector completion, delegated precompiles, and fatal database errors.
 - Root inspector completion callbacks now observe reserve rejection, including immediate
   empty-account and precompile results. Stock Geth and Parity traces use their generic revert
   labels; the returned execution result retains the distinct Monad reason. Attempted trace
