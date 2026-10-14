@@ -36,10 +36,20 @@ const SPECS: [MonadHardfork; 4] = [
 
 #[derive(Debug, Default)]
 struct CallRecorder {
+    started_addresses: Vec<Address>,
     outcomes: Vec<(u64, CallOutcome)>,
 }
 
 impl Inspector<MonadContext<InMemoryDB>> for CallRecorder {
+    fn call(
+        &mut self,
+        _context: &mut MonadContext<InMemoryDB>,
+        inputs: &mut CallInputs,
+    ) -> Option<CallOutcome> {
+        self.started_addresses.push(inputs.bytecode_address);
+        None
+    }
+
     fn call_end(
         &mut self,
         _context: &mut MonadContext<InMemoryDB>,
@@ -147,6 +157,17 @@ fn expected_output(call_opcode: u8, success: bool, output: &[u8]) -> Bytes {
     bytes.into()
 }
 
+fn assert_inspector_addresses(recorder: &CallRecorder, call_opcode: u8, target: Address) {
+    assert_eq!(
+        recorder.started_addresses,
+        if call_opcode == 0 {
+            vec![target]
+        } else {
+            vec![PROXY, target]
+        }
+    );
+}
+
 #[test]
 fn dynamic_ethereum_precompiles_execute_empty_code_when_delegated() {
     for spec in SPECS {
@@ -173,6 +194,7 @@ fn dynamic_ethereum_precompiles_execute_empty_code_when_delegated() {
                         &expected_output(call_opcode, true, &[])
                     );
                     if inspected {
+                        assert_inspector_addresses(evm.components().1, call_opcode, AUTHORITY);
                         let (gas_limit, outcome) = &evm.components().1.outcomes[0];
                         assert_eq!(outcome.result.gas.remaining(), *gas_limit);
                         assert_eq!(outcome.result.gas.total_gas_spent(), 0);
@@ -194,6 +216,7 @@ fn direct_dynamic_identity_calls_keep_their_output_and_gas() {
                 CallRecorder::default(),
             );
             let result = evm.transact(transaction(destination)).unwrap().result;
+            assert_inspector_addresses(evm.components().1, call_opcode, u64_to_address(4));
             assert!(result.is_success());
             assert_eq!(
                 result.output().unwrap(),
@@ -265,6 +288,11 @@ fn dynamic_overrides_and_removals_respect_protocol_addresses() {
                         })
                     });
                     let result = evm.transact(transaction(destination)).unwrap().result;
+                    assert_inspector_addresses(
+                        evm.components().1,
+                        call_opcode,
+                        if delegated { AUTHORITY } else { target },
+                    );
                     let executed = !(removed || delegated && target == identity);
                     assert!(result.is_success());
                     assert_eq!(
