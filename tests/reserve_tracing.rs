@@ -19,6 +19,7 @@ use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 const SENDER: Address = Address::repeat_byte(0x11);
 const TARGET: Address = Address::repeat_byte(0x22);
 const CHILD: Address = Address::repeat_byte(0x33);
+const DELEGATE: Address = Address::repeat_byte(0x44);
 const GAS_LIMIT: u64 = 1_000_000;
 
 fn mon(amount: u64) -> U256 {
@@ -101,7 +102,7 @@ fn stock_geth_and_parity_traces_report_rejected_call_and_create() {
         MonadHardfork::MonadTen,
         MonadHardfork::MonadNext,
     ] {
-        for create in [false, true] {
+        for (create, delegated) in [(false, false), (false, true), (true, false)] {
             let mut db = InMemoryDB::default();
             db.insert_account_info(
                 SENDER,
@@ -141,9 +142,15 @@ fn stock_geth_and_parity_traces_report_rejected_call_and_create() {
             ]);
             if !create {
                 db.insert_account_info(
-                    TARGET,
+                    if delegated { DELEGATE } else { TARGET },
                     AccountInfo::default().with_code(Bytecode::new_raw(Bytes::from(code.clone()))),
                 );
+                if delegated {
+                    db.insert_account_info(
+                        TARGET,
+                        AccountInfo::default().with_code(Bytecode::new_eip7702(DELEGATE)),
+                    );
+                }
             }
             let mut evm = MonadEvmFactory::default().create_evm_with_inspector(
                 db,
@@ -178,6 +185,9 @@ fn stock_geth_and_parity_traces_report_rejected_call_and_create() {
                 .build_fill();
             let out = evm.transact(tx).unwrap();
             assert_rejected_trace(evm.components().1, &out, create, 1, 1);
+            if !create {
+                assert_eq!(evm.components().1.traces().nodes()[0].trace.address, TARGET);
+            }
             let target = if create { SENDER.create(0) } else { TARGET };
             assert_eq!(out.state[&target].info.balance, U256::ZERO);
             assert!(out.state[&target]
@@ -190,7 +200,8 @@ fn stock_geth_and_parity_traces_report_rejected_call_and_create() {
 
 #[test]
 fn stock_traces_report_rejected_immediate_call_results() {
-    for recipient in [TARGET, Address::with_last_byte(4)] {
+    let identity = Address::with_last_byte(4);
+    for (recipient, delegation) in [(TARGET, None), (identity, None), (TARGET, Some(identity))] {
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             SENDER,
@@ -199,6 +210,12 @@ fn stock_traces_report_rejected_immediate_call_results() {
                 ..Default::default()
             },
         );
+        if let Some(delegation) = delegation {
+            db.insert_account_info(
+                recipient,
+                AccountInfo::default().with_code(Bytecode::new_eip7702(delegation)),
+            );
+        }
         let mut evm = MonadEvmFactory::default().create_evm_with_inspector(
             db,
             EvmEnv::new(
@@ -217,12 +234,23 @@ fn stock_traces_report_rejected_immediate_call_results() {
         let tx = TxEnv::builder()
             .caller(SENDER)
             .to(recipient)
+            .data(Bytes::from_static(b"hello"))
             .value(mon(3))
             .gas_limit(GAS_LIMIT)
             .gas_price(1)
             .build_fill();
         let out = evm.transact(tx).unwrap();
         assert_rejected_trace(evm.components().1, &out, false, 0, 0);
+        let trace = &evm.components().1.traces().nodes()[0].trace;
+        assert_eq!(trace.address, recipient);
+        assert_eq!(
+            trace.output.as_ref(),
+            if recipient == identity {
+                &b"hello"[..]
+            } else {
+                &[]
+            }
+        );
         assert_eq!(out.state[&recipient].info.balance, U256::ZERO);
     }
 }
