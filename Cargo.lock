@@ -197,6 +197,7 @@ dependencies = [
 name = "alloy-monad-evm"
 version = "0.8.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-evm",
  "alloy-primitives",
  "alloy-rpc-types-trace",
@@ -1796,7 +1797,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "monad-revm"
 version = "0.8.0"
-source = "git+https://github.com/category-labs/monad-revm?rev=bc7f7afc8a5e408782c6d67d4224f3ea6966a7a3#bc7f7afc8a5e408782c6d67d4224f3ea6966a7a3"
+source = "git+https://github.com/category-labs/monad-revm?rev=5adee66553a1ed1644ad243aa94fde09739bd0d1#5adee66553a1ed1644ad243aa94fde09739bd0d1"
 dependencies = [
  "alloy-sol-types",
  "auto_impl",

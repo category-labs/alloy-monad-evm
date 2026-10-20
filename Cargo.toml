@@ -35,9 +35,10 @@ redundant-clone = "warn"
 alloy-evm = { version = "0.39.0", default-features = false }
 alloy-primitives = { version = "1.6.1", default-features = false }
 revm = { version = "43.0.0", default-features = false }
-monad-revm = { version = "0.8.0", git = "https://github.com/category-labs/monad-revm", rev = "bc7f7afc8a5e408782c6d67d4224f3ea6966a7a3", default-features = false }
+monad-revm = { version = "0.8.0", git = "https://github.com/category-labs/monad-revm", rev = "5adee66553a1ed1644ad243aa94fde09739bd0d1", default-features = false }
 
 [dev-dependencies]
+alloy-consensus = { version = "2.4", default-features = false }
 alloy-rpc-types-trace = { version = "2.4", default-features = false }
 revm-inspectors = "0.43"
 
