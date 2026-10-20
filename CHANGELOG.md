@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Report the full transaction gas limit in Alloy receipts and cumulative block gas for
+  Monad transactions. Execution consumption remains available through `total_gas_spent()`.
 - EIP-7702 delegation to Ethereum precompiles now returns empty output without charging precompile
   gas, including dynamic precompile overrides. Temporarily pinned `monad-revm` to the immutable
   fix commit pending its next release.
@@ -18,8 +20,9 @@ All notable changes to this project are documented in this file.
 - Propagate `MonadHaltReason` through `Evm` and `EvmFactory`, retaining the distinct reserve-balance
   rejection outcome from `monad-revm`. Downstream result types and halt-reason matches must use
   the re-exported Monad type, with ordinary Ethereum halts wrapped in its `Ethereum` variant.
-  Pin merged `monad-revm` commit `bc7f7afc8a5e408782c6d67d4224f3ea6966a7a3`, including
-  reserve enforcement, inspector completion, delegated precompiles, and fatal database errors.
+  Pin `monad-revm` commit `5adee66553a1ed1644ad243aa94fde09739bd0d1`, including reserve
+  enforcement, inspector completion, delegated precompiles, fatal database errors, and
+  charged transaction gas.
 - Root inspector completion callbacks now observe reserve rejection, including immediate
   empty-account and precompile results. Stock Geth and Parity traces use their generic revert
   labels; the returned execution result retains the distinct Monad reason. Attempted trace

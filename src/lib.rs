@@ -915,7 +915,8 @@ mod tests {
         evm.transact(tx)
             .expect("storage transaction should execute")
             .result
-            .tx_gas_used()
+            .gas()
+            .total_gas_spent()
     }
 
     fn storage_read_gas(spec: MonadHardfork, second_slot: u8) -> u64 {
